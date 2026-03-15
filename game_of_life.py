@@ -321,6 +321,179 @@ class Grid:
 
 
 # ---------------------------------------------------------------------------
+# Multi-state automata — Brian's Brain (3 states) and Wireworld (4 states)
+# ---------------------------------------------------------------------------
+
+# Automaton type names for cycling
+MULTISTATE_TYPES = ["Life", "Brian's Brain", "Wireworld"]
+
+# Brian's Brain cell states
+BB_OFF = 0
+BB_ON = 1
+BB_DYING = 2
+
+# Wireworld cell states
+WW_EMPTY = 0
+WW_HEAD = 1
+WW_TAIL = 2
+WW_CONDUCTOR = 3
+
+
+class MultiStateGrid:
+    """Grid that supports multi-state cellular automata (Brian's Brain, Wireworld)."""
+
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        # Each cell stores an int state; 0 = default/empty, absent = empty
+        self.cells: dict[tuple[int, int], int] = {}
+        self.toroidal = False
+
+    def clear(self) -> None:
+        self.cells.clear()
+
+    def _neighbors(self, r: int, c: int):
+        """Yield valid neighbor coordinates."""
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = r + dr, c + dc
+                if self.toroidal:
+                    nr %= self.height
+                    nc %= self.width
+                elif not (0 <= nr < self.height and 0 <= nc < self.width):
+                    continue
+                yield nr, nc
+
+    def tick_brians_brain(self) -> None:
+        """Advance one generation of Brian's Brain.
+
+        Rules:
+        - ON cells become DYING
+        - DYING cells become OFF
+        - OFF cells with exactly 2 ON neighbors become ON
+        """
+        new_cells: dict[tuple[int, int], int] = {}
+        # Collect all positions to check (ON/DYING cells and their neighbors)
+        candidates: set[tuple[int, int]] = set()
+        for pos, state in self.cells.items():
+            candidates.add(pos)
+            if state == BB_ON:
+                for nr, nc in self._neighbors(*pos):
+                    candidates.add((nr, nc))
+
+        for pos in candidates:
+            state = self.cells.get(pos, BB_OFF)
+            if state == BB_ON:
+                new_cells[pos] = BB_DYING
+            elif state == BB_DYING:
+                pass  # becomes OFF (removed)
+            else:
+                # Count ON neighbors
+                on_count = sum(
+                    1 for nr, nc in self._neighbors(*pos)
+                    if self.cells.get((nr, nc), BB_OFF) == BB_ON
+                )
+                if on_count == 2:
+                    new_cells[pos] = BB_ON
+        self.cells = new_cells
+
+    def tick_wireworld(self) -> None:
+        """Advance one generation of Wireworld.
+
+        Rules:
+        - EMPTY stays EMPTY
+        - HEAD becomes TAIL
+        - TAIL becomes CONDUCTOR
+        - CONDUCTOR becomes HEAD if exactly 1 or 2 neighbors are HEAD, else stays CONDUCTOR
+        """
+        new_cells: dict[tuple[int, int], int] = {}
+        for pos, state in self.cells.items():
+            if state == WW_HEAD:
+                new_cells[pos] = WW_TAIL
+            elif state == WW_TAIL:
+                new_cells[pos] = WW_CONDUCTOR
+            elif state == WW_CONDUCTOR:
+                head_count = sum(
+                    1 for nr, nc in self._neighbors(*pos)
+                    if self.cells.get((nr, nc), WW_EMPTY) == WW_HEAD
+                )
+                if head_count in (1, 2):
+                    new_cells[pos] = WW_HEAD
+                else:
+                    new_cells[pos] = WW_CONDUCTOR
+        self.cells = new_cells
+
+    def randomize_brians_brain(self, density: float = 0.3) -> None:
+        """Fill grid with random Brian's Brain cells."""
+        self.cells.clear()
+        for r in range(self.height):
+            for c in range(self.width):
+                if random.random() < density:
+                    self.cells[(r, c)] = random.choice([BB_ON, BB_DYING])
+
+    def randomize_wireworld(self) -> None:
+        """Fill grid with a random Wireworld circuit.
+
+        Creates random conductor paths with a few electron heads.
+        """
+        self.cells.clear()
+        # Create random conductor paths
+        for r in range(self.height):
+            for c in range(self.width):
+                if random.random() < 0.25:
+                    self.cells[(r, c)] = WW_CONDUCTOR
+        # Add some electron heads on conductors
+        conductors = [pos for pos, s in self.cells.items() if s == WW_CONDUCTOR]
+        num_heads = max(1, len(conductors) // 20)
+        for pos in random.sample(conductors, min(num_heads, len(conductors))):
+            self.cells[pos] = WW_HEAD
+
+    def toggle_cell_brians_brain(self, r: int, c: int) -> None:
+        """Cycle cell state: OFF -> ON -> DYING -> OFF."""
+        pos = (r, c)
+        state = self.cells.get(pos, BB_OFF)
+        if state == BB_OFF:
+            self.cells[pos] = BB_ON
+        elif state == BB_ON:
+            self.cells[pos] = BB_DYING
+        else:
+            del self.cells[pos]
+
+    def toggle_cell_wireworld(self, r: int, c: int) -> None:
+        """Cycle cell state: EMPTY -> CONDUCTOR -> HEAD -> TAIL -> EMPTY."""
+        pos = (r, c)
+        state = self.cells.get(pos, WW_EMPTY)
+        if state == WW_EMPTY:
+            self.cells[pos] = WW_CONDUCTOR
+        elif state == WW_CONDUCTOR:
+            self.cells[pos] = WW_HEAD
+        elif state == WW_HEAD:
+            self.cells[pos] = WW_TAIL
+        else:
+            del self.cells[pos]
+
+    def from_life_grid(self, grid: "Grid", automaton_type: str) -> None:
+        """Convert a standard 2-state Grid into multi-state cells."""
+        self.cells.clear()
+        self.width = grid.width
+        self.height = grid.height
+        self.toroidal = grid.toroidal
+        if automaton_type == "Brian's Brain":
+            for pos in grid.cells:
+                self.cells[pos] = BB_ON
+        elif automaton_type == "Wireworld":
+            for pos in grid.cells:
+                self.cells[pos] = WW_CONDUCTOR
+            # Turn a few alive cells into electron heads to seed activity
+            alive = list(grid.cells)
+            num_heads = max(1, len(alive) // 10)
+            for pos in random.sample(alive, min(num_heads, len(alive))):
+                self.cells[pos] = WW_HEAD
+
+
+# ---------------------------------------------------------------------------
 # Pattern detector — identifies known still lifes, oscillators, spaceships
 # ---------------------------------------------------------------------------
 
@@ -817,6 +990,11 @@ class App:
         self.split_gen = 0
         self.split_pop_left: list[int] = []
         self.split_pop_right: list[int] = []
+        # Multi-state automaton mode (Brian's Brain / Wireworld)
+        self.multistate_mode = False
+        self.multistate_type_idx = 0  # 0=Life, 1=Brian's Brain, 2=Wireworld
+        self.multistate_grid: MultiStateGrid | None = None
+        self.multistate_gen = 0
         # Wolfram 1D elementary cellular automaton mode
         self.wolfram_mode = False
         self.wolfram_rule = 30  # Wolfram rule number (0-255)
@@ -842,6 +1020,9 @@ class App:
             if self.wolfram_mode:
                 if self.running:
                     self._wolfram_tick()
+            elif self.multistate_mode:
+                if self.running:
+                    self._multistate_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -888,6 +1069,12 @@ class App:
             curses.init_pair(14, curses.COLOR_GREEN, -1)   # warm
             curses.init_pair(15, curses.COLOR_YELLOW, -1)  # hot
             curses.init_pair(16, curses.COLOR_RED, -1)     # hottest (frequently active)
+            # Multi-state automaton colors
+            curses.init_pair(17, curses.COLOR_WHITE, -1)   # Brian's Brain: ON
+            curses.init_pair(18, curses.COLOR_BLUE, -1)    # Brian's Brain: DYING
+            curses.init_pair(19, curses.COLOR_YELLOW, -1)  # Wireworld: HEAD (electron)
+            curses.init_pair(20, curses.COLOR_RED, -1)     # Wireworld: TAIL
+            curses.init_pair(21, curses.COLOR_CYAN, -1)    # Wireworld: CONDUCTOR
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -934,6 +1121,10 @@ class App:
         # Wolfram 1D mode has its own input handler
         if self.wolfram_mode:
             return self._handle_wolfram_input(key)
+
+        # Multi-state automaton mode has its own input handler
+        if self.multistate_mode:
+            return self._handle_multistate_input(key)
 
         # Split mode has limited input
         if self.split_mode:
@@ -1106,6 +1297,10 @@ class App:
         # Wolfram 1D elementary CA mode
         elif key == ord("W"):
             self._start_wolfram()
+
+        # Multi-state automaton mode (Brian's Brain / Wireworld)
+        elif key == ord("X"):
+            self._start_multistate()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -1509,6 +1704,143 @@ class App:
         if len(self.wolfram_rows) > max_rows:
             self.wolfram_rows = self.wolfram_rows[-max_rows:]
 
+    # --- multi-state automaton mode ---
+
+    def _handle_multistate_input(self, key: int) -> bool:
+        """Handle input while in multi-state automaton mode."""
+        # Movement
+        if key in (curses.KEY_UP, ord("k")):
+            self.cursor_r = max(0, self.cursor_r - 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            self.cursor_r = min(self.grid.height - 1, self.cursor_r + 1)
+        elif key in (curses.KEY_LEFT, ord("h")):
+            self.cursor_c = max(0, self.cursor_c - 1)
+        elif key in (curses.KEY_RIGHT, ord("l")):
+            self.cursor_c = min(self.grid.width - 1, self.cursor_c + 1)
+        # Run / pause
+        elif key == ord(" "):
+            self.running = not self.running
+        # Step
+        elif key == ord("s"):
+            if not self.running:
+                self._multistate_tick()
+        # Randomize
+        elif key == ord("r"):
+            self._multistate_randomize()
+            self.multistate_gen = 0
+            self._set_message("Randomized")
+        # Clear
+        elif key == ord("c"):
+            if self.multistate_grid:
+                self.multistate_grid.clear()
+            self.multistate_gen = 0
+            self._set_message("Cleared")
+        # Toggle cell (cycle through states)
+        elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
+            if self.multistate_grid:
+                atype = MULTISTATE_TYPES[self.multistate_type_idx]
+                if atype == "Brian's Brain":
+                    self.multistate_grid.toggle_cell_brians_brain(self.cursor_r, self.cursor_c)
+                elif atype == "Wireworld":
+                    self.multistate_grid.toggle_cell_wireworld(self.cursor_r, self.cursor_c)
+        # Cycle automaton type with F/G
+        elif key == ord("f"):
+            self.multistate_type_idx = (self.multistate_type_idx + 1) % len(MULTISTATE_TYPES)
+            atype = MULTISTATE_TYPES[self.multistate_type_idx]
+            if atype == "Life":
+                self._stop_multistate()
+            else:
+                self._switch_multistate_type()
+        elif key == ord("g"):
+            self.multistate_type_idx = (self.multistate_type_idx - 1) % len(MULTISTATE_TYPES)
+            atype = MULTISTATE_TYPES[self.multistate_type_idx]
+            if atype == "Life":
+                self._stop_multistate()
+            else:
+                self._switch_multistate_type()
+        # Speed control
+        elif key in (ord("+"), ord("="), ord("]")):
+            self.speed = min(20, self.speed + 1)
+            self._update_timeout()
+        elif key in (ord("-"), ord("_"), ord("[")):
+            self.speed = max(1, self.speed - 1)
+            self._update_timeout()
+        # Toroidal toggle
+        elif key == ord("t"):
+            if self.multistate_grid:
+                self.multistate_grid.toroidal = not self.multistate_grid.toroidal
+                mode = "ON" if self.multistate_grid.toroidal else "OFF"
+                self._set_message(f"Toroidal wrapping {mode}")
+        # Quit
+        elif key == ord("q"):
+            return False
+        # Exit multi-state mode
+        elif key == ord("X") or key == 27:
+            self._stop_multistate()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_multistate(self) -> None:
+        """Enter multi-state automaton mode, prompting for type."""
+        # Start with Brian's Brain (index 1)
+        self.multistate_type_idx = 1
+        self.running = False
+        self.multistate_mode = True
+        self.multistate_gen = 0
+        self.multistate_grid = MultiStateGrid(self.grid.width, self.grid.height)
+        self.multistate_grid.toroidal = self.grid.toroidal
+        self.multistate_grid.from_life_grid(self.grid, MULTISTATE_TYPES[self.multistate_type_idx])
+        atype = MULTISTATE_TYPES[self.multistate_type_idx]
+        self._set_message(
+            f"{atype} — [F/G]Cycle type [Space]Run [S]tep [R]and [Enter]Toggle cell [X]Exit"
+        )
+
+    def _stop_multistate(self) -> None:
+        """Exit multi-state automaton mode."""
+        self.multistate_mode = False
+        self.multistate_type_idx = 0
+        self.running = False
+        self.multistate_grid = None
+        self.multistate_gen = 0
+        self._set_message("Multi-state mode ended")
+
+    def _switch_multistate_type(self) -> None:
+        """Switch to a different multi-state automaton type."""
+        atype = MULTISTATE_TYPES[self.multistate_type_idx]
+        self.multistate_gen = 0
+        self.running = False
+        if self.multistate_grid:
+            self.multistate_grid.clear()
+        else:
+            self.multistate_grid = MultiStateGrid(self.grid.width, self.grid.height)
+            self.multistate_grid.toroidal = self.grid.toroidal
+        self.multistate_grid.from_life_grid(self.grid, atype)
+        self._set_message(
+            f"{atype} — [F/G]Cycle type [Space]Run [S]tep [R]and [Enter]Toggle cell [X]Exit"
+        )
+
+    def _multistate_tick(self) -> None:
+        """Advance one generation of the multi-state automaton."""
+        if not self.multistate_grid:
+            return
+        atype = MULTISTATE_TYPES[self.multistate_type_idx]
+        if atype == "Brian's Brain":
+            self.multistate_grid.tick_brians_brain()
+        elif atype == "Wireworld":
+            self.multistate_grid.tick_wireworld()
+        self.multistate_gen += 1
+
+    def _multistate_randomize(self) -> None:
+        """Randomize the multi-state grid for the current type."""
+        if not self.multistate_grid:
+            return
+        atype = MULTISTATE_TYPES[self.multistate_type_idx]
+        if atype == "Brian's Brain":
+            self.multistate_grid.randomize_brians_brain()
+        elif atype == "Wireworld":
+            self.multistate_grid.randomize_wireworld()
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -1832,6 +2164,8 @@ class App:
 
         if self.wolfram_mode:
             self._draw_wolfram(max_h, max_w, grid_rows, grid_cols)
+        elif self.multistate_mode:
+            self._draw_multistate(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
@@ -1975,7 +2309,111 @@ class App:
                 f" [Space]Run [S]tep [R]and [C]lear [Q]uit | "
                 f"[P/N]Pat: {pat_name}{custom_tag} [Enter]Place [Esc]Desel |"
                 f"{brush_info} | "
-                f"[F/G]Rule [D]ash [H]eat [A]Evolve [M]Split [W]olfram [B]lue [X]Del [L]RLE [+/-]Spd [T]orus [</>]Rew [w]Save [O]Load"
+                f"[F/G]Rule [D]ash [H]eat [A]Evolve [M]Split [W]olfram [Shift+X]Multi [B]lue [x]Del [L]RLE [+/-]Spd [T]orus [</>]Rew [w]Save [O]Load"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
+    def _multistate_cell_attr(self, state: int, automaton_type: str) -> tuple[str, int]:
+        """Return (character, curses attr) for a multi-state cell."""
+        if automaton_type == "Brian's Brain":
+            if state == BB_ON:
+                attr = (curses.color_pair(17) | curses.A_BOLD) if self.use_color else curses.A_BOLD
+                return "██", attr
+            elif state == BB_DYING:
+                attr = curses.color_pair(18) if self.use_color else curses.A_DIM
+                return "▒▒", attr
+        elif automaton_type == "Wireworld":
+            if state == WW_HEAD:
+                attr = (curses.color_pair(19) | curses.A_BOLD) if self.use_color else curses.A_BOLD
+                return "██", attr
+            elif state == WW_TAIL:
+                attr = curses.color_pair(20) if self.use_color else curses.A_DIM
+                return "██", attr
+            elif state == WW_CONDUCTOR:
+                attr = curses.color_pair(21) if self.use_color else curses.A_NORMAL
+                return "░░", attr
+        return "  ", 0
+
+    def _draw_multistate(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the multi-state automaton grid."""
+        if not self.multistate_grid:
+            return
+        atype = MULTISTATE_TYPES[self.multistate_type_idx]
+        mg = self.multistate_grid
+
+        for screen_r in range(min(grid_rows, mg.height)):
+            r = screen_r + self.view_r
+            if r >= mg.height:
+                break
+            for screen_c in range(min(grid_cols, mg.width)):
+                c = screen_c + self.view_c
+                if c >= mg.width:
+                    break
+                x = screen_c * 2
+                if x + 1 >= max_w:
+                    break
+
+                state = mg.cells.get((r, c), 0)
+                is_cursor = (r == self.cursor_r and c == self.cursor_c)
+
+                if is_cursor:
+                    attr = curses.A_REVERSE
+                    if self.use_color:
+                        attr |= curses.color_pair(2)
+                    ch = "██" if state != 0 else "▒▒"
+                elif state != 0:
+                    ch, attr = self._multistate_cell_attr(state, atype)
+                else:
+                    ch, attr = "  ", 0
+
+                try:
+                    self.stdscr.addstr(screen_r, x, ch, attr)
+                except curses.error:
+                    pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            state_str = "RUNNING" if self.running else "PAUSED"
+            topo = "Torus" if mg.toroidal else "Bounded"
+            cell_count = len(mg.cells)
+            # State breakdown
+            if atype == "Brian's Brain":
+                on = sum(1 for s in mg.cells.values() if s == BB_ON)
+                dying = sum(1 for s in mg.cells.values() if s == BB_DYING)
+                breakdown = f"ON:{on} DYING:{dying}"
+            else:
+                heads = sum(1 for s in mg.cells.values() if s == WW_HEAD)
+                tails = sum(1 for s in mg.cells.values() if s == WW_TAIL)
+                conds = sum(1 for s in mg.cells.values() if s == WW_CONDUCTOR)
+                breakdown = f"HEAD:{heads} TAIL:{tails} WIRE:{conds}"
+            status = (
+                f" {atype} | Gen: {self.multistate_gen} | Cells: {cell_count} ({breakdown}) | "
+                f"Speed: {self.speed} | {topo} | {state_str} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            if atype == "Brian's Brain":
+                legend = "ON=██ DYING=▒▒"
+            else:
+                legend = "HEAD=██ TAIL=██ WIRE=░░"
+            help_text = (
+                f" [Space]Run [S]tep [R]and [C]lear [Enter]Cycle cell | "
+                f"[F/G]Type:{atype} | {legend} | "
+                f"[+/-]Spd [T]orus [X]Exit [Q]uit"
             )
             try:
                 self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
