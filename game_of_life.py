@@ -195,6 +195,14 @@ class Grid:
                     self.cells.add((r, c))
                     self.ages[(r, c)] = 1
 
+    def set_cell(self, r: int, c: int) -> None:
+        """Set a cell to alive (no toggle — always turns on)."""
+        if 0 <= r < self.height and 0 <= c < self.width:
+            pos = (r, c)
+            if pos not in self.cells:
+                self.cells.add(pos)
+                self.ages[pos] = 1
+
     def place_pattern(self, pattern: list[tuple[int, int]], origin_r: int, origin_c: int) -> None:
         for dr, dc in pattern:
             r, c = origin_r + dr, origin_c + dc
@@ -434,6 +442,11 @@ class App:
         self.blueprint_cells: set[tuple[int, int]] = set()  # cells drawn in blueprint
         self.sel_corner1: tuple[int, int] | None = None  # first selection corner
         self.sel_corner2: tuple[int, int] | None = None  # second selection corner
+        # Brush mode state
+        self.brush_active = False  # True while painting
+        self.brush_size = 1       # radius: 1 → 1x1, 2 → 3x3, 3 → 5x5, etc.
+        self.brush_shape = "square"  # "square", "diamond", "circle"
+        self.BRUSH_SHAPES = ["square", "diamond", "circle"]
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -511,17 +524,26 @@ class App:
             return False
 
         # Movement
+        moved = False
         if key in (curses.KEY_UP, ord("k")):
             self.cursor_r = max(0, self.cursor_r - 1)
+            moved = True
         elif key in (curses.KEY_DOWN, ord("j")):
             self.cursor_r = min(self.grid.height - 1, self.cursor_r + 1)
+            moved = True
         elif key in (curses.KEY_LEFT, ord("h")):
             self.cursor_c = max(0, self.cursor_c - 1)
+            moved = True
         elif key in (curses.KEY_RIGHT, ord("l")):
             self.cursor_c = min(self.grid.width - 1, self.cursor_c + 1)
+            moved = True
+
+        # Paint while brush is active and cursor moves
+        if moved and self.brush_active:
+            self._brush_paint()
 
         # Toggle run / pause
-        elif key == ord(" "):
+        if not moved and key == ord(" "):
             self.running = not self.running
 
         # Step
@@ -550,11 +572,13 @@ class App:
             self.pop_history.clear()
             self._set_message("Cleared")
 
-        # Place cell or pattern
+        # Place cell or pattern (or brush stamp)
         elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
             if self.pattern_idx is not None:
                 pat = self.all_patterns[self.all_pattern_names[self.pattern_idx]]
                 self.grid.place_pattern(pat, self.cursor_r, self.cursor_c)
+            elif self.brush_size > 1:
+                self._brush_paint()
             else:
                 self.grid.toggle_cell(self.cursor_r, self.cursor_c)
 
@@ -570,9 +594,13 @@ class App:
             else:
                 self.pattern_idx = (self.pattern_idx + 1) % len(self.all_pattern_names)
 
-        # Deselect pattern
+        # Deselect pattern / deactivate brush
         elif key == 27:  # Escape
-            self.pattern_idx = None
+            if self.brush_active:
+                self.brush_active = False
+                self._set_message("Brush OFF")
+            else:
+                self.pattern_idx = None
 
         # Speed control
         elif key in (ord("+"), ord("="), ord("]")):
@@ -623,6 +651,29 @@ class App:
         # Delete custom pattern
         elif key == ord("x"):
             self._delete_custom_pattern()
+
+        # Brush: toggle painting with [V]
+        elif key == ord("v"):
+            self.brush_active = not self.brush_active
+            if self.brush_active:
+                self._brush_paint()  # paint at current position immediately
+                self._set_message(f"Brush ON ({self._brush_label()}) — move to paint, [V] stop")
+            else:
+                self._set_message("Brush OFF")
+
+        # Brush shape: cycle with [E]
+        elif key == ord("e"):
+            idx = self.BRUSH_SHAPES.index(self.brush_shape)
+            self.brush_shape = self.BRUSH_SHAPES[(idx + 1) % len(self.BRUSH_SHAPES)]
+            self._set_message(f"Brush shape: {self.brush_shape}")
+
+        # Brush size with [z/Z] keys: z shrink, Z grow (shift+z)
+        elif key == ord("z"):
+            self.brush_size = max(1, self.brush_size - 1)
+            self._set_message(f"Brush: {self._brush_label()}")
+        elif key == ord("Z"):
+            self.brush_size = min(5, self.brush_size + 1)
+            self._set_message(f"Brush: {self._brush_label()}")
 
         # Resize
         elif key == curses.KEY_RESIZE:
@@ -710,6 +761,34 @@ class App:
         self.grid.survival = set(survival)
         rs = rule_string(self.grid.birth, self.grid.survival)
         self._set_message(f"Rule: {name} ({rs})")
+
+    # --- brush mode ---
+
+    def _brush_offsets(self) -> list[tuple[int, int]]:
+        """Return list of (dr, dc) offsets for current brush size and shape."""
+        radius = self.brush_size - 1  # size 1 → radius 0 (single cell)
+        offsets = []
+        for dr in range(-radius, radius + 1):
+            for dc in range(-radius, radius + 1):
+                if self.brush_shape == "square":
+                    offsets.append((dr, dc))
+                elif self.brush_shape == "diamond":
+                    if abs(dr) + abs(dc) <= radius:
+                        offsets.append((dr, dc))
+                elif self.brush_shape == "circle":
+                    if dr * dr + dc * dc <= radius * radius:
+                        offsets.append((dr, dc))
+        return offsets
+
+    def _brush_paint(self) -> None:
+        """Paint cells at cursor position using current brush."""
+        for dr, dc in self._brush_offsets():
+            self.grid.set_cell(self.cursor_r + dr, self.cursor_c + dc)
+
+    def _brush_label(self) -> str:
+        """Return a short label describing the current brush."""
+        dim = self.brush_size * 2 - 1
+        return f"{dim}x{dim} {self.brush_shape}"
 
     # --- blueprint mode ---
 
@@ -883,12 +962,18 @@ class App:
             sidebar_w = min(self.DASHBOARD_WIDTH, max_w // 3)
             grid_cols = max(1, (max_w - sidebar_w) // 2)
 
-        # Build ghost preview set for pattern
+        # Build ghost preview set for pattern or brush
         ghost: set[tuple[int, int]] = set()
         if self.pattern_idx is not None:
             pat = self.all_patterns[self.all_pattern_names[self.pattern_idx]]
             for dr, dc in pat:
                 ghost.add((self.cursor_r + dr, self.cursor_c + dc))
+        elif self.brush_size > 1 or self.brush_active:
+            # Show brush footprint preview
+            for dr, dc in self._brush_offsets():
+                br, bc = self.cursor_r + dr, self.cursor_c + dc
+                if 0 <= br < self.grid.height and 0 <= bc < self.grid.width:
+                    ghost.add((br, bc))
 
         # Draw grid
         for screen_r in range(min(grid_rows, self.grid.height)):
@@ -953,9 +1038,10 @@ class App:
             rule_name, _, _ = RULESETS[self.rule_idx]
             rs = rule_string(self.grid.birth, self.grid.survival)
             rule_info = f"{rule_name} {rs}"
+            brush_section = f" | Brush: {self._brush_label()}" if self.brush_active else ""
             status = (
                 f" Gen: {self.generation} | Cells: {len(self.grid.cells)}{spark_section} | "
-                f"Rule: {rule_info} | Speed: {self.speed} | {topo} | {hist_info} | {state} "
+                f"Rule: {rule_info} | Speed: {self.speed} | {topo} | {hist_info} | {state}{brush_section} "
             )
             if self.message_ttl > 0:
                 status += f"| {self.message} "
@@ -972,9 +1058,12 @@ class App:
             pat_name = self.all_pattern_names[self.pattern_idx] if self.pattern_idx is not None else "None"
             custom_count = len(self.all_pattern_names) - len(PATTERNS)
             custom_tag = f" (+{custom_count} custom)" if custom_count > 0 else ""
+            brush_state = "ON" if self.brush_active else "off"
+            brush_info = f" [V]Brush:{brush_state} [z/Z]Size [E]Shape:{self.brush_shape}"
             help_text = (
                 f" [Space]Run [S]tep [R]and [C]lear [Q]uit | "
-                f"[P/N]Pat: {pat_name}{custom_tag} [Enter]Place [Esc]Desel | "
+                f"[P/N]Pat: {pat_name}{custom_tag} [Enter]Place [Esc]Desel |"
+                f"{brush_info} | "
                 f"[F/G]Rule [D]ash [B]lue [X]Del [+/-]Spd [T]orus [</>]Rew [W]Save [O]Load"
             )
             try:
