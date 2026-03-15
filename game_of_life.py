@@ -3844,6 +3844,217 @@ FIRE_TREE = 1
 FIRE_BURNING = 2
 FIRE_CHARRED = 3
 
+# ── DLA (Diffusion-Limited Aggregation) ──────────────────────────────────────
+
+DLA_EMPTY = 0
+DLA_CRYSTAL = 1
+DLA_WALKER = 2
+
+DLA_PRESETS = {
+    "center-seed": {
+        "desc": "Single seed at center — classic snowflake growth",
+        "num_walkers": 800,
+        "stickiness": 1.0,
+        "spawn_mode": "boundary",
+        "seed_mode": "center",
+        "walkers_per_tick": 50,
+    },
+    "line-seed": {
+        "desc": "Bottom line seed — upward dendritic growth",
+        "num_walkers": 600,
+        "stickiness": 1.0,
+        "spawn_mode": "top",
+        "seed_mode": "bottom-line",
+        "walkers_per_tick": 40,
+    },
+    "multi-seed": {
+        "desc": "Multiple random seeds — competing crystal fronts",
+        "num_walkers": 1000,
+        "stickiness": 1.0,
+        "spawn_mode": "boundary",
+        "seed_mode": "multi",
+        "walkers_per_tick": 60,
+    },
+    "sparse-tendrils": {
+        "desc": "Low stickiness — long wispy tendrils",
+        "num_walkers": 600,
+        "stickiness": 0.3,
+        "spawn_mode": "boundary",
+        "seed_mode": "center",
+        "walkers_per_tick": 40,
+    },
+    "coral": {
+        "desc": "Dense coral-like growth from bottom",
+        "num_walkers": 1200,
+        "stickiness": 0.7,
+        "spawn_mode": "top",
+        "seed_mode": "bottom-line",
+        "walkers_per_tick": 80,
+    },
+    "lightning": {
+        "desc": "Top seed, bottom walkers — lightning bolt pattern",
+        "num_walkers": 800,
+        "stickiness": 0.5,
+        "spawn_mode": "bottom",
+        "seed_mode": "top-point",
+        "walkers_per_tick": 50,
+    },
+}
+DLA_PRESET_NAMES = list(DLA_PRESETS.keys())
+
+
+class DLAWorld:
+    """Diffusion-Limited Aggregation — fractal crystal growth via random walkers."""
+
+    def __init__(self, width: int, height: int, preset: str = "center-seed"):
+        self.width = width
+        self.height = height
+        self.preset_idx = DLA_PRESET_NAMES.index(preset)
+        self.stickiness = 1.0
+        self.walkers_per_tick = 50
+        self.num_walkers = 800
+        self.spawn_mode = "boundary"
+        # Grid: 0=empty, positive=crystal (value = order of attachment)
+        self.grid = [[0] * width for _ in range(height)]
+        self.walkers: list[tuple[int, int]] = []
+        self.crystal_count = 0
+        self.max_crystal_order = 0
+        self._apply_preset(preset)
+
+    def _apply_preset(self, name: str) -> None:
+        import random as _rng
+        cfg = DLA_PRESETS[name]
+        self.stickiness = cfg["stickiness"]
+        self.walkers_per_tick = cfg["walkers_per_tick"]
+        self.num_walkers = cfg["num_walkers"]
+        self.spawn_mode = cfg["spawn_mode"]
+        self.grid = [[0] * self.width for _ in range(self.height)]
+        self.walkers = []
+        self.crystal_count = 0
+        self.max_crystal_order = 0
+
+        seed_mode = cfg["seed_mode"]
+        if seed_mode == "center":
+            cx, cy = self.width // 2, self.height // 2
+            self._place_seed(cy, cx)
+        elif seed_mode == "bottom-line":
+            for c in range(self.width):
+                self._place_seed(self.height - 1, c)
+        elif seed_mode == "multi":
+            count = max(3, (self.width * self.height) // 400)
+            for _ in range(count):
+                r = _rng.randint(self.height // 4, 3 * self.height // 4)
+                c = _rng.randint(self.width // 4, 3 * self.width // 4)
+                self._place_seed(r, c)
+        elif seed_mode == "top-point":
+            cx = self.width // 2
+            self._place_seed(0, cx)
+
+        # Spawn initial walkers
+        for _ in range(self.num_walkers):
+            self._spawn_walker(_rng)
+
+    def _place_seed(self, r: int, c: int) -> None:
+        if 0 <= r < self.height and 0 <= c < self.width and self.grid[r][c] == 0:
+            self.crystal_count += 1
+            self.max_crystal_order = self.crystal_count
+            self.grid[r][c] = self.crystal_count
+
+    def _spawn_walker(self, _rng) -> None:
+        w, h = self.width, self.height
+        mode = self.spawn_mode
+        if mode == "boundary":
+            side = _rng.randint(0, 3)
+            if side == 0:
+                pos = (0, _rng.randint(0, w - 1))
+            elif side == 1:
+                pos = (h - 1, _rng.randint(0, w - 1))
+            elif side == 2:
+                pos = (_rng.randint(0, h - 1), 0)
+            else:
+                pos = (_rng.randint(0, h - 1), w - 1)
+        elif mode == "top":
+            pos = (0, _rng.randint(0, w - 1))
+        elif mode == "bottom":
+            pos = (h - 1, _rng.randint(0, w - 1))
+        else:
+            pos = (_rng.randint(0, h - 1), _rng.randint(0, w - 1))
+        if self.grid[pos[0]][pos[1]] == 0:
+            self.walkers.append(pos)
+
+    def cycle_preset(self, direction: int = 1) -> str:
+        self.preset_idx = (self.preset_idx + direction) % len(DLA_PRESET_NAMES)
+        name = DLA_PRESET_NAMES[self.preset_idx]
+        self._apply_preset(name)
+        return name
+
+    def reset(self) -> None:
+        self._apply_preset(DLA_PRESET_NAMES[self.preset_idx])
+
+    def add_seed(self, r: int, c: int) -> None:
+        """Manually place a crystal seed."""
+        self._place_seed(r, c)
+
+    def tick(self) -> None:
+        import random as _rng
+        for _ in range(self.walkers_per_tick):
+            self._step(_rng)
+
+    def _has_crystal_neighbor(self, r: int, c: int) -> bool:
+        w, h = self.width, self.height
+        if r > 0 and self.grid[r - 1][c] > 0:
+            return True
+        if r < h - 1 and self.grid[r + 1][c] > 0:
+            return True
+        if c > 0 and self.grid[r][c - 1] > 0:
+            return True
+        if c < w - 1 and self.grid[r][c + 1] > 0:
+            return True
+        return False
+
+    def _step(self, _rng) -> None:
+        w, h = self.width, self.height
+        new_walkers = []
+        for r, c in self.walkers:
+            # Random walk
+            dr = _rng.choice((-1, 0, 1))
+            dc = _rng.choice((-1, 0, 1))
+            nr, nc = r + dr, c + dc
+            # Boundary: wrap or clamp
+            if nr < 0 or nr >= h or nc < 0 or nc >= w:
+                # Re-spawn at boundary
+                self._spawn_walker(_rng)
+                continue
+            if self.grid[nr][nc] > 0:
+                # Walked into a crystal cell; stay put and check for sticking
+                nr, nc = r, c
+            if self._has_crystal_neighbor(nr, nc) and self.grid[nr][nc] == 0:
+                if _rng.random() < self.stickiness:
+                    # Stick!
+                    self.crystal_count += 1
+                    self.max_crystal_order = self.crystal_count
+                    self.grid[nr][nc] = self.crystal_count
+                    # Spawn a replacement walker
+                    self._spawn_walker(_rng)
+                else:
+                    new_walkers.append((nr, nc))
+            else:
+                new_walkers.append((nr, nc))
+        self.walkers = new_walkers
+
+        # Top up walkers if below target
+        while len(self.walkers) < self.num_walkers:
+            self._spawn_walker(_rng)
+
+    @property
+    def stats(self) -> dict:
+        total = self.width * self.height
+        return {
+            "crystals": self.crystal_count,
+            "walkers": len(self.walkers),
+            "coverage": self.crystal_count / total if total > 0 else 0,
+        }
+
 FORESTFIRE_PRESETS = {
     "classic": {
         "desc": "Classic forest fire — balanced growth and lightning",
@@ -4870,6 +5081,11 @@ class App:
         self.forestfire_world: ForestFireWorld | None = None
         self.forestfire_gen = 0
         self.forestfire_preset_idx = 0
+        # DLA (Diffusion-Limited Aggregation) mode
+        self.dla_mode = False
+        self.dla_world: DLAWorld | None = None
+        self.dla_gen = 0
+        self.dla_preset_idx = 0
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -4943,6 +5159,9 @@ class App:
             elif self.forestfire_mode:
                 if self.running:
                     self._forestfire_tick()
+            elif self.dla_mode:
+                if self.running:
+                    self._dla_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -5108,6 +5327,13 @@ class App:
             curses.init_pair(143, curses.COLOR_WHITE, -1)    # ForestFire: charred (hot)
             curses.init_pair(144, curses.COLOR_BLACK, -1)    # ForestFire: charred (cool)
             curses.init_pair(145, curses.COLOR_GREEN, curses.COLOR_GREEN)  # ForestFire: dense tree
+            # DLA mode color pairs
+            curses.init_pair(150, curses.COLOR_WHITE, -1)    # DLA: crystal core
+            curses.init_pair(151, curses.COLOR_CYAN, -1)     # DLA: crystal young
+            curses.init_pair(152, curses.COLOR_BLUE, -1)     # DLA: crystal mid
+            curses.init_pair(153, curses.COLOR_MAGENTA, -1)  # DLA: crystal old
+            curses.init_pair(154, curses.COLOR_YELLOW, -1)   # DLA: walker
+            curses.init_pair(155, curses.COLOR_GREEN, -1)    # DLA: crystal tip
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -5226,6 +5452,10 @@ class App:
         # Forest Fire mode has its own input handler
         if self.forestfire_mode:
             return self._handle_forestfire_input(key)
+
+        # DLA mode has its own input handler
+        if self.dla_mode:
+            return self._handle_dla_input(key)
 
         # Split mode has limited input
         if self.split_mode:
@@ -5470,6 +5700,10 @@ class App:
         # Forest Fire simulation mode
         elif key == ord("F"):
             self._start_forestfire()
+
+        # DLA (Diffusion-Limited Aggregation) simulation mode
+        elif key == ord("L"):
+            self._start_dla()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -9429,6 +9663,199 @@ class App:
             except curses.error:
                 pass
 
+    # --- DLA (Diffusion-Limited Aggregation) mode ---
+
+    def _handle_dla_input(self, key: int) -> bool:
+        """Handle input while in DLA mode."""
+        if key == ord("q"):
+            return False
+        elif key == ord(" "):
+            self.running = not self.running
+        elif key == ord("s"):
+            self._dla_tick()
+        elif key == ord("r"):
+            if self.dla_world:
+                self.dla_world.reset()
+                self.dla_gen = 0
+                self._set_message("DLA reset")
+        elif key == ord("p"):
+            if self.dla_world:
+                name = self.dla_world.cycle_preset(-1)
+                self.dla_preset_idx = self.dla_world.preset_idx
+                self.dla_gen = 0
+                self._set_message(f"Preset: {name}")
+        elif key == ord("n"):
+            if self.dla_world:
+                name = self.dla_world.cycle_preset(1)
+                self.dla_preset_idx = self.dla_world.preset_idx
+                self.dla_gen = 0
+                self._set_message(f"Preset: {name}")
+        elif key == ord("f"):
+            if self.dla_world:
+                self.dla_world.walkers_per_tick = min(
+                    200, self.dla_world.walkers_per_tick + 10
+                )
+                self._set_message(f"Steps/tick: {self.dla_world.walkers_per_tick}")
+        elif key == ord("d"):
+            if self.dla_world:
+                self.dla_world.walkers_per_tick = max(
+                    5, self.dla_world.walkers_per_tick - 10
+                )
+                self._set_message(f"Steps/tick: {self.dla_world.walkers_per_tick}")
+        elif key == ord("w"):
+            if self.dla_world:
+                self.dla_world.num_walkers = min(5000, self.dla_world.num_walkers + 100)
+                self._set_message(f"Walkers: {self.dla_world.num_walkers}")
+        elif key == ord("W"):
+            if self.dla_world:
+                self.dla_world.num_walkers = max(50, self.dla_world.num_walkers - 100)
+                self._set_message(f"Walkers: {self.dla_world.num_walkers}")
+        elif key == ord("k"):
+            if self.dla_world:
+                self.dla_world.stickiness = min(1.0, self.dla_world.stickiness + 0.1)
+                self._set_message(f"Stickiness: {self.dla_world.stickiness:.1f}")
+        elif key == ord("K"):
+            if self.dla_world:
+                self.dla_world.stickiness = max(0.1, self.dla_world.stickiness - 0.1)
+                self._set_message(f"Stickiness: {self.dla_world.stickiness:.1f}")
+        elif key == ord("L") or key == 27:  # Shift+L or ESC to exit
+            self._stop_dla()
+        elif key == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, bstate = curses.getmouse()
+                if self.dla_world and bstate & curses.BUTTON1_CLICKED:
+                    gc = mx // 2
+                    gr = my
+                    self.dla_world.add_seed(gr, gc)
+            except curses.error:
+                pass
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_dla(self) -> None:
+        """Enter DLA simulation mode."""
+        self.running = False
+        self.dla_mode = True
+        self.dla_gen = 0
+        max_h, max_w = self.stdscr.getmaxyx()
+        w = max(4, max_w // 2)
+        h = max(4, max_h - 3)
+        preset = DLA_PRESET_NAMES[self.dla_preset_idx]
+        self.dla_world = DLAWorld(w, h, preset=preset)
+        try:
+            curses.mousemask(curses.BUTTON1_CLICKED)
+        except curses.error:
+            pass
+        self._set_message(
+            "DLA — [Space]Run [P/N]Preset [Click]Seed [Shift+L]Exit"
+        )
+
+    def _stop_dla(self) -> None:
+        """Exit DLA simulation mode."""
+        self.dla_mode = False
+        self.running = False
+        self.dla_world = None
+        self.dla_gen = 0
+        self._set_message("DLA mode ended")
+
+    def _dla_tick(self) -> None:
+        """Advance one DLA simulation step."""
+        if self.dla_world:
+            self.dla_world.tick()
+            self.dla_gen += 1
+
+    def _draw_dla(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the DLA simulation."""
+        if not self.dla_world:
+            return
+        dw = self.dla_world
+
+        draw_h = min(grid_rows, dw.height)
+        draw_w = min(grid_cols, dw.width)
+
+        max_order = max(1, dw.max_crystal_order)
+
+        # Build walker set for fast lookup
+        walker_set = set(dw.walkers)
+
+        for r in range(draw_h):
+            row = dw.grid[r]
+            for c in range(draw_w):
+                sc = c * 2
+                if sc + 1 >= max_w:
+                    break
+
+                val = row[c]
+                if val > 0:
+                    # Crystal cell — color by age
+                    age_frac = val / max_order
+                    if age_frac < 0.1:
+                        ch = "██"
+                        cp = 150  # white: core
+                    elif age_frac < 0.35:
+                        ch = "██"
+                        cp = 153  # magenta: old
+                    elif age_frac < 0.6:
+                        ch = "▓▓"
+                        cp = 152  # blue: mid
+                    elif age_frac < 0.85:
+                        ch = "▒▒"
+                        cp = 151  # cyan: young
+                    else:
+                        ch = "░░"
+                        cp = 155  # green: tips
+                elif (r, c) in walker_set:
+                    ch = "··"
+                    cp = 154  # yellow: walker
+                else:
+                    continue
+
+                try:
+                    if self.use_color:
+                        self.stdscr.addstr(r, sc, ch, curses.color_pair(cp))
+                    else:
+                        attr = curses.A_BOLD if val > 0 else curses.A_DIM
+                        self.stdscr.addstr(r, sc, ch, attr)
+                except curses.error:
+                    pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            preset_name = DLA_PRESET_NAMES[dw.preset_idx]
+            state_str = "RUNNING" if self.running else "PAUSED"
+            st = dw.stats
+            status = (
+                f" DLA | Gen: {self.dla_gen} | "
+                f"Crystals: {st['crystals']} ({st['coverage']:.1%}) | "
+                f"Walkers: {st['walkers']} | "
+                f"Sticky: {dw.stickiness:.1f} | "
+                f"Preset: {preset_name} | {state_str} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            help_text = (
+                " [Space]Run [S]tep [R]eset | "
+                "[P/N]Preset [F]aster [D]slower | "
+                "[w/W]Walkers± [k/K]Sticky± | "
+                "[Click]Seed | [Shift+L]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -9788,6 +10215,8 @@ class App:
             self._draw_sandpile(max_h, max_w, grid_rows, grid_cols)
         elif self.forestfire_mode:
             self._draw_forestfire(max_h, max_w, grid_rows, grid_cols)
+        elif self.dla_mode:
+            self._draw_dla(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
