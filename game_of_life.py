@@ -4680,6 +4680,292 @@ class MazeWorld:
         }
 
 
+# ---------------------------------------------------------------------------
+# Mandelbrot & Julia Set Fractal Explorer
+# ---------------------------------------------------------------------------
+
+FRACTAL_PRESETS = {
+    "classic": {
+        "center_re": -0.5,
+        "center_im": 0.0,
+        "zoom": 1.0,
+        "max_iter": 80,
+        "julia_mode": False,
+        "julia_re": -0.7,
+        "julia_im": 0.27015,
+    },
+    "seahorse-valley": {
+        "center_re": -0.745,
+        "center_im": 0.186,
+        "zoom": 200.0,
+        "max_iter": 150,
+        "julia_mode": False,
+        "julia_re": -0.745,
+        "julia_im": 0.186,
+    },
+    "spiral": {
+        "center_re": -0.761574,
+        "center_im": -0.0847596,
+        "zoom": 500.0,
+        "max_iter": 200,
+        "julia_mode": False,
+        "julia_re": -0.761574,
+        "julia_im": -0.0847596,
+    },
+    "julia-dendrite": {
+        "center_re": 0.0,
+        "center_im": 0.0,
+        "zoom": 1.0,
+        "max_iter": 100,
+        "julia_mode": True,
+        "julia_re": 0.0,
+        "julia_im": 1.0,
+    },
+    "julia-rabbit": {
+        "center_re": 0.0,
+        "center_im": 0.0,
+        "zoom": 1.0,
+        "max_iter": 100,
+        "julia_mode": True,
+        "julia_re": -0.123,
+        "julia_im": 0.745,
+    },
+    "julia-galaxy": {
+        "center_re": 0.0,
+        "center_im": 0.0,
+        "zoom": 1.0,
+        "max_iter": 120,
+        "julia_mode": True,
+        "julia_re": -0.8,
+        "julia_im": 0.156,
+    },
+}
+FRACTAL_PRESET_NAMES = list(FRACTAL_PRESETS.keys())
+
+FRACTAL_PALETTES = [
+    "classic",
+    "fire",
+    "ocean",
+    "neon",
+    "grayscale",
+]
+
+
+class FractalWorld:
+    """Interactive Mandelbrot & Julia set fractal explorer."""
+
+    def __init__(self, width: int, height: int, preset: str = "classic"):
+        self.width = width
+        self.height = height
+        self.preset_idx = FRACTAL_PRESET_NAMES.index(preset)
+        self.palette_idx = 0
+
+        # View parameters
+        self.center_re = -0.5
+        self.center_im = 0.0
+        self.zoom = 1.0
+        self.max_iter = 80
+
+        # Julia mode
+        self.julia_mode = False
+        self.julia_re = -0.7
+        self.julia_im = 0.27015
+
+        # Cursor position (grid coords for Julia c selection)
+        self.cursor_r = height // 2
+        self.cursor_c = width // 2
+
+        # Pre-computed iteration grid
+        self.grid: list[list[int]] = [[0] * width for _ in range(height)]
+        self.dirty = True
+
+        self._apply_preset(preset)
+
+    def _apply_preset(self, name: str) -> None:
+        cfg = FRACTAL_PRESETS[name]
+        self.center_re = cfg["center_re"]
+        self.center_im = cfg["center_im"]
+        self.zoom = cfg["zoom"]
+        self.max_iter = cfg["max_iter"]
+        self.julia_mode = cfg["julia_mode"]
+        self.julia_re = cfg["julia_re"]
+        self.julia_im = cfg["julia_im"]
+        self.dirty = True
+
+    def cycle_preset(self, direction: int = 1) -> str:
+        self.preset_idx = (self.preset_idx + direction) % len(FRACTAL_PRESET_NAMES)
+        name = FRACTAL_PRESET_NAMES[self.preset_idx]
+        self._apply_preset(name)
+        return name
+
+    def cycle_palette(self, direction: int = 1) -> str:
+        self.palette_idx = (self.palette_idx + direction) % len(FRACTAL_PALETTES)
+        self.dirty = True
+        return FRACTAL_PALETTES[self.palette_idx]
+
+    def reset(self) -> None:
+        self._apply_preset(FRACTAL_PRESET_NAMES[self.preset_idx])
+
+    def pan(self, dr: float, di: float) -> None:
+        """Pan the view by (dr, di) in complex-plane units scaled by zoom."""
+        scale = 3.0 / self.zoom
+        self.center_re += dr * scale * 0.1
+        self.center_im += di * scale * 0.1
+        self.dirty = True
+
+    def zoom_in(self, factor: float = 1.5) -> None:
+        self.zoom *= factor
+        self.dirty = True
+
+    def zoom_out(self, factor: float = 1.5) -> None:
+        self.zoom /= factor
+        if self.zoom < 0.1:
+            self.zoom = 0.1
+        self.dirty = True
+
+    def increase_iter(self, amount: int = 20) -> None:
+        self.max_iter = min(1000, self.max_iter + amount)
+        self.dirty = True
+
+    def decrease_iter(self, amount: int = 20) -> None:
+        self.max_iter = max(10, self.max_iter - amount)
+        self.dirty = True
+
+    def toggle_julia(self) -> None:
+        """Toggle between Mandelbrot and Julia mode.
+
+        When switching to Julia, use cursor position as c parameter.
+        """
+        if not self.julia_mode:
+            # Compute the complex coordinate at cursor
+            re, im = self._grid_to_complex(self.cursor_r, self.cursor_c)
+            self.julia_re = re
+            self.julia_im = im
+            self.julia_mode = True
+            # Reset view for Julia set
+            self.center_re = 0.0
+            self.center_im = 0.0
+            self.zoom = 1.0
+        else:
+            self.julia_mode = False
+            self.center_re = -0.5
+            self.center_im = 0.0
+            self.zoom = 1.0
+        self.dirty = True
+
+    def _grid_to_complex(self, row: int, col: int) -> tuple[float, float]:
+        """Convert grid coordinates to complex plane coordinates."""
+        aspect = self.width / max(1, self.height)
+        scale = 3.0 / self.zoom
+        re = self.center_re + (col - self.width / 2) / self.width * scale * aspect
+        im = self.center_im + (row - self.height / 2) / self.height * scale
+        return re, im
+
+    def compute(self) -> None:
+        """Recompute the fractal iteration counts for the current view."""
+        if not self.dirty:
+            return
+        w, h = self.width, self.height
+        aspect = w / max(1, h)
+        scale = 3.0 / self.zoom
+        cx = self.center_re
+        cy = self.center_im
+        mi = self.max_iter
+        julia = self.julia_mode
+        jre = self.julia_re
+        jim = self.julia_im
+
+        for r in range(h):
+            row_data = self.grid[r]
+            im = cy + (r - h / 2) / h * scale
+            for c in range(w):
+                re = cx + (c - w / 2) / w * scale * aspect
+
+                if julia:
+                    zr, zi = re, im
+                    cr, ci = jre, jim
+                else:
+                    zr, zi = 0.0, 0.0
+                    cr, ci = re, im
+
+                n = 0
+                while n < mi and zr * zr + zi * zi <= 4.0:
+                    zr, zi = zr * zr - zi * zi + cr, 2.0 * zr * zi + ci
+                    n += 1
+
+                row_data[c] = n
+
+        self.dirty = False
+
+    def tick(self) -> None:
+        """Recompute if dirty (called each frame)."""
+        self.compute()
+
+    def iter_to_char_attr(self, n: int, use_color: bool) -> tuple[str, int]:
+        """Map iteration count to a display character and curses attribute."""
+        if n >= self.max_iter:
+            return "  ", curses.A_NORMAL  # inside set = black
+
+        palette = FRACTAL_PALETTES[self.palette_idx]
+        t = n / max(1, self.max_iter)
+
+        # Shade characters from sparse to dense
+        shades = " ░▒▓█"
+        si = min(len(shades) - 1, int(t * len(shades)))
+        ch = shades[si] * 2
+
+        if not use_color:
+            if n >= self.max_iter:
+                return "  ", curses.A_NORMAL
+            levels = [curses.A_DIM, curses.A_NORMAL, curses.A_BOLD]
+            return ch, levels[min(2, int(t * 3))]
+
+        # Map to color pairs 180-195 based on palette and iteration
+        if palette == "classic":
+            # Blue -> Cyan -> Green -> Yellow -> Red cycle
+            colors = [180, 181, 182, 183, 184, 185, 186]
+        elif palette == "fire":
+            colors = [187, 188, 189, 183, 183, 189, 188]
+        elif palette == "ocean":
+            colors = [180, 181, 190, 181, 180, 190, 181]
+        elif palette == "neon":
+            colors = [191, 192, 193, 191, 192, 193, 191]
+        else:  # grayscale
+            colors = [194, 195, 194, 195, 194, 195, 194]
+
+        ci = int(t * (len(colors) - 1))
+        ci = min(ci, len(colors) - 1)
+        pair = colors[ci]
+
+        attr = curses.color_pair(pair)
+        if t > 0.7:
+            attr |= curses.A_BOLD
+
+        return ch, attr
+
+    @property
+    def cursor_complex(self) -> tuple[float, float]:
+        """Return the complex coordinate at the current cursor position."""
+        return self._grid_to_complex(self.cursor_r, self.cursor_c)
+
+    @property
+    def stats(self) -> dict:
+        mode = "Julia" if self.julia_mode else "Mandelbrot"
+        re, im = self.cursor_complex
+        return {
+            "mode": mode,
+            "center_re": self.center_re,
+            "center_im": self.center_im,
+            "zoom": self.zoom,
+            "max_iter": self.max_iter,
+            "cursor_re": re,
+            "cursor_im": im,
+            "julia_re": self.julia_re,
+            "julia_im": self.julia_im,
+            "palette": FRACTAL_PALETTES[self.palette_idx],
+        }
+
+
 class SIRWorld:
     """Epidemic SIR (Susceptible-Infected-Recovered) grid simulation."""
 
@@ -5657,6 +5943,11 @@ class App:
         self.maze_world: MazeWorld | None = None
         self.maze_gen = 0
         self.maze_preset_idx = 0
+        # Fractal Explorer mode
+        self.fractal_mode = False
+        self.fractal_world: FractalWorld | None = None
+        self.fractal_gen = 0
+        self.fractal_preset_idx = 0
         # Demo Tour (screensaver) state
         self.demo_tour_mode = False
         self.demo_tour_idx = 0          # current index into MENU_MODES
@@ -5697,6 +5988,8 @@ class App:
             ("Procedural", "Turmites (U)", "2D Turing machines on a grid", "_start_turmite"),
             # --- Algorithms ---
             ("Algorithms", "Maze Solver (M)", "Procedural maze generation with A* pathfinding", "_start_maze"),
+            # --- Mathematics ---
+            ("Mathematics", "Fractal Explorer (Z)", "Interactive Mandelbrot & Julia set explorer with zoom/pan", "_start_fractal"),
         ]
         # Precompute category boundaries for menu rendering
         self._menu_categories: list[str] = []
@@ -5794,6 +6087,8 @@ class App:
             elif self.maze_mode:
                 if self.running:
                     self._maze_tick()
+            elif self.fractal_mode:
+                self._fractal_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -5982,6 +6277,23 @@ class App:
             curses.init_pair(175, curses.COLOR_YELLOW, -1)    # Maze: solution
             curses.init_pair(176, curses.COLOR_CYAN, -1)      # Maze: frontier
             curses.init_pair(177, curses.COLOR_MAGENTA, -1)   # Maze: carving
+            # Fractal Explorer colors
+            curses.init_pair(180, curses.COLOR_BLUE, -1)       # Fractal: classic blue
+            curses.init_pair(181, curses.COLOR_CYAN, -1)       # Fractal: classic cyan
+            curses.init_pair(182, curses.COLOR_GREEN, -1)      # Fractal: classic green
+            curses.init_pair(183, curses.COLOR_YELLOW, -1)     # Fractal: classic yellow
+            curses.init_pair(184, curses.COLOR_RED, -1)        # Fractal: classic red
+            curses.init_pair(185, curses.COLOR_MAGENTA, -1)    # Fractal: classic magenta
+            curses.init_pair(186, curses.COLOR_WHITE, -1)      # Fractal: classic white
+            curses.init_pair(187, curses.COLOR_RED, -1)        # Fractal: fire red
+            curses.init_pair(188, curses.COLOR_YELLOW, -1)     # Fractal: fire yellow
+            curses.init_pair(189, curses.COLOR_WHITE, -1)      # Fractal: fire white
+            curses.init_pair(190, curses.COLOR_BLUE, -1)       # Fractal: ocean deep
+            curses.init_pair(191, curses.COLOR_MAGENTA, -1)    # Fractal: neon magenta
+            curses.init_pair(192, curses.COLOR_CYAN, -1)       # Fractal: neon cyan
+            curses.init_pair(193, curses.COLOR_GREEN, -1)      # Fractal: neon green
+            curses.init_pair(194, curses.COLOR_WHITE, -1)      # Fractal: grayscale light
+            curses.init_pair(195, curses.COLOR_WHITE, -1)      # Fractal: grayscale dim
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -6116,6 +6428,10 @@ class App:
         # Epidemic SIR mode has its own input handler
         if self.sir_mode:
             return self._handle_sir_input(key)
+
+        # Fractal Explorer mode has its own input handler
+        if self.fractal_mode:
+            return self._handle_fractal_input(key)
 
         # Maze mode has its own input handler
         if self.maze_mode:
@@ -6377,6 +6693,10 @@ class App:
         elif key == ord("M"):
             self._start_maze()
 
+        # Fractal Explorer mode
+        elif key == ord("Z"):
+            self._start_fractal()
+
         # Split-screen comparison mode
         elif key == ord("m"):
             if self.split_mode:
@@ -6408,12 +6728,9 @@ class App:
         elif key in (ord("?"), ord("/")):
             self._open_menu()
 
-        # Brush size with [z/Z] keys: z shrink, Z grow (shift+z)
+        # Brush size with [z] key: z shrink
         elif key == ord("z"):
             self.brush_size = max(1, self.brush_size - 1)
-            self._set_message(f"Brush: {self._brush_label()}")
-        elif key == ord("Z"):
-            self.brush_size = min(5, self.brush_size + 1)
             self._set_message(f"Brush: {self._brush_label()}")
 
         # Resize
@@ -10963,6 +11280,180 @@ class App:
             except curses.error:
                 pass
 
+    # --- Fractal Explorer mode ---
+
+    def _handle_fractal_input(self, key: int) -> bool:
+        """Handle input while in Fractal Explorer mode."""
+        if key == ord("q"):
+            return False
+        elif key in (curses.KEY_UP, ord("k")):
+            if self.fractal_world:
+                self.fractal_world.pan(0, -1)
+                self.fractal_world.cursor_r = max(0, self.fractal_world.cursor_r - 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            if self.fractal_world:
+                self.fractal_world.pan(0, 1)
+                self.fractal_world.cursor_r = min(self.fractal_world.height - 1, self.fractal_world.cursor_r + 1)
+        elif key in (curses.KEY_LEFT, ord("h")):
+            if self.fractal_world:
+                self.fractal_world.pan(-1, 0)
+                self.fractal_world.cursor_c = max(0, self.fractal_world.cursor_c - 1)
+        elif key in (curses.KEY_RIGHT, ord("l")):
+            if self.fractal_world:
+                self.fractal_world.pan(1, 0)
+                self.fractal_world.cursor_c = min(self.fractal_world.width - 1, self.fractal_world.cursor_c + 1)
+        elif key == ord("+") or key == ord("=") or key == ord("i"):
+            if self.fractal_world:
+                self.fractal_world.zoom_in()
+                self._set_message(f"Zoom: {self.fractal_world.zoom:.1f}x")
+        elif key == ord("-") or key == ord("o"):
+            if self.fractal_world:
+                self.fractal_world.zoom_out()
+                self._set_message(f"Zoom: {self.fractal_world.zoom:.1f}x")
+        elif key == ord("]"):
+            if self.fractal_world:
+                self.fractal_world.increase_iter()
+                self._set_message(f"Max iterations: {self.fractal_world.max_iter}")
+        elif key == ord("["):
+            if self.fractal_world:
+                self.fractal_world.decrease_iter()
+                self._set_message(f"Max iterations: {self.fractal_world.max_iter}")
+        elif key == ord("J") or key == ord(" "):
+            if self.fractal_world:
+                self.fractal_world.toggle_julia()
+                mode = "Julia" if self.fractal_world.julia_mode else "Mandelbrot"
+                self._set_message(f"Switched to {mode} set")
+        elif key == ord("c"):
+            if self.fractal_world:
+                name = self.fractal_world.cycle_palette()
+                self._set_message(f"Palette: {name}")
+        elif key == ord("p"):
+            if self.fractal_world:
+                name = self.fractal_world.cycle_preset(-1)
+                self.fractal_preset_idx = self.fractal_world.preset_idx
+                self._set_message(f"Preset: {name}")
+        elif key == ord("n"):
+            if self.fractal_world:
+                name = self.fractal_world.cycle_preset(1)
+                self.fractal_preset_idx = self.fractal_world.preset_idx
+                self._set_message(f"Preset: {name}")
+        elif key == ord("r"):
+            if self.fractal_world:
+                self.fractal_world.reset()
+                self.fractal_gen = 0
+                self._set_message("View reset")
+        elif key == ord("Z") or key == 27:  # Shift+Z or ESC to exit
+            self._stop_fractal()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_fractal(self) -> None:
+        """Enter Fractal Explorer mode."""
+        self.running = False
+        self.fractal_mode = True
+        self.fractal_gen = 0
+        max_h, max_w = self.stdscr.getmaxyx()
+        w = max(4, max_w // 2)
+        h = max(4, max_h - 3)
+        preset = FRACTAL_PRESET_NAMES[self.fractal_preset_idx]
+        self.fractal_world = FractalWorld(w, h, preset=preset)
+        self._set_message(
+            "Fractal Explorer — [Arrows]Pan [+/-]Zoom [Space]Julia [C]olor [P/N]Preset [Shift+Z]Exit"
+        )
+
+    def _stop_fractal(self) -> None:
+        """Exit Fractal Explorer mode."""
+        self.fractal_mode = False
+        self.running = False
+        self.fractal_world = None
+        self.fractal_gen = 0
+        self._set_message("Fractal Explorer mode ended")
+
+    def _fractal_tick(self) -> None:
+        """Advance one fractal computation step."""
+        if self.fractal_world:
+            self.fractal_world.tick()
+            self.fractal_gen += 1
+
+    def _draw_fractal(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the Fractal Explorer simulation."""
+        if not self.fractal_world:
+            return
+        fw = self.fractal_world
+
+        # Ensure computed
+        fw.compute()
+
+        draw_h = min(grid_rows, fw.height)
+        draw_w = min(grid_cols, fw.width)
+
+        for r in range(draw_h):
+            row_data = fw.grid[r]
+            for c in range(draw_w):
+                sc = c * 2
+                if sc + 1 >= max_w:
+                    break
+
+                n = row_data[c]
+                ch, attr = fw.iter_to_char_attr(n, self.use_color)
+
+                try:
+                    self.stdscr.addstr(r, sc, ch, attr)
+                except curses.error:
+                    pass
+
+        # Draw cursor crosshair (only in Mandelbrot mode for Julia selection)
+        if not fw.julia_mode:
+            cr, cc = fw.cursor_r, fw.cursor_c
+            if 0 <= cr < draw_h and 0 <= cc < draw_w:
+                sc = cc * 2
+                if sc + 1 < max_w:
+                    try:
+                        self.stdscr.addstr(cr, sc, "++", curses.A_REVERSE | curses.A_BOLD)
+                    except curses.error:
+                        pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            st = fw.stats
+            preset_name = FRACTAL_PRESET_NAMES[fw.preset_idx]
+            if fw.julia_mode:
+                status = (
+                    f" {st['mode']} | c=({st['julia_re']:.4f}, {st['julia_im']:.4f}i) | "
+                    f"Zoom: {st['zoom']:.1f}x | Iter: {st['max_iter']} | "
+                    f"Palette: {st['palette']} | {preset_name} "
+                )
+            else:
+                status = (
+                    f" {st['mode']} | Center: ({st['center_re']:.6f}, {st['center_im']:.6f}i) | "
+                    f"Zoom: {st['zoom']:.1f}x | Iter: {st['max_iter']} | "
+                    f"Cursor: ({st['cursor_re']:.4f}, {st['cursor_im']:.4f}i) | "
+                    f"Palette: {st['palette']} | {preset_name} "
+                )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            help_text = (
+                " [Arrows/hjkl]Pan [+/-/i/o]Zoom []/[]Iter | "
+                "[Space/J]Toggle Julia [C]olor palette | "
+                "[P/N]Preset [R]eset | [Shift+Z]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -11330,6 +11821,8 @@ class App:
             self._draw_sir(max_h, max_w, grid_rows, grid_cols)
         elif self.maze_mode:
             self._draw_maze(max_h, max_w, grid_rows, grid_cols)
+        elif self.fractal_mode:
+            self._draw_fractal(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
@@ -12158,6 +12651,8 @@ class App:
             self._stop_sir()
         elif self.maze_mode:
             self._stop_maze()
+        elif self.fractal_mode:
+            self._stop_fractal()
         elif self.split_mode:
             self._stop_split()
         elif self.evolve_mode:
