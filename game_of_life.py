@@ -6,6 +6,7 @@ import curses
 import json
 import os
 import random
+import math
 import re
 from collections import Counter
 from typing import ClassVar
@@ -585,6 +586,167 @@ class MultiStateGrid:
 
 
 # ---------------------------------------------------------------------------
+# Lenia — continuous cellular automaton
+# ---------------------------------------------------------------------------
+
+# Lenia preset species: each defines kernel and growth parameters
+# Parameters: R (kernel radius), T (time step divisor),
+#   kernel_mu, kernel_sigma (bell-curve kernel shape),
+#   growth_mu, growth_sigma (growth function center and width)
+LENIA_PRESETS = {
+    "Orbium": {
+        "R": 13, "T": 10,
+        "kernel_mu": 0.5, "kernel_sigma": 0.15,
+        "growth_mu": 0.15, "growth_sigma": 0.015,
+    },
+    "Geminium": {
+        "R": 10, "T": 10,
+        "kernel_mu": 0.5, "kernel_sigma": 0.15,
+        "growth_mu": 0.14, "growth_sigma": 0.014,
+    },
+    "Hydrogeminium": {
+        "R": 12, "T": 10,
+        "kernel_mu": 0.5, "kernel_sigma": 0.15,
+        "growth_mu": 0.16, "growth_sigma": 0.016,
+    },
+    "Smooth Life": {
+        "R": 8, "T": 5,
+        "kernel_mu": 0.5, "kernel_sigma": 0.20,
+        "growth_mu": 0.26, "growth_sigma": 0.036,
+    },
+}
+
+LENIA_PRESET_NAMES = list(LENIA_PRESETS.keys())
+
+# Shade characters for rendering continuous values (5 levels)
+LENIA_SHADES = " ░▒▓█"
+
+
+class LeniaGrid:
+    """Continuous-state cellular automaton grid (Lenia).
+
+    Cell values are floats in [0.0, 1.0]. The kernel and growth function
+    are parameterized bell curves, producing smooth, organic dynamics.
+    """
+
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        # 2D grid of floats [0.0, 1.0]
+        self.cells: list[list[float]] = [[0.0] * width for _ in range(height)]
+        self.toroidal = True
+        # Default to Orbium parameters
+        self._set_params(LENIA_PRESETS["Orbium"])
+        # Precomputed kernel (ring of weights)
+        self._kernel: list[tuple[int, int, float]] = []
+        self._kernel_sum = 0.0
+        self._build_kernel()
+
+    def _set_params(self, params: dict) -> None:
+        """Apply a preset's parameters."""
+        self.R = params["R"]
+        self.T = params["T"]
+        self.kernel_mu = params["kernel_mu"]
+        self.kernel_sigma = params["kernel_sigma"]
+        self.growth_mu = params["growth_mu"]
+        self.growth_sigma = params["growth_sigma"]
+
+    def _bell(self, x: float, mu: float, sigma: float) -> float:
+        """Gaussian bell curve."""
+        return math.exp(-((x - mu) ** 2) / (2.0 * sigma * sigma))
+
+    def _build_kernel(self) -> None:
+        """Build the convolution kernel as a list of (dr, dc, weight) tuples."""
+        self._kernel = []
+        self._kernel_sum = 0.0
+        R = self.R
+        for dr in range(-R, R + 1):
+            for dc in range(-R, R + 1):
+                dist = math.sqrt(dr * dr + dc * dc) / R
+                if 0.0 < dist <= 1.0:
+                    w = self._bell(dist, self.kernel_mu, self.kernel_sigma)
+                    self._kernel.append((dr, dc, w))
+                    self._kernel_sum += w
+
+    def apply_preset(self, name: str) -> None:
+        """Switch to a named Lenia preset species."""
+        if name in LENIA_PRESETS:
+            self._set_params(LENIA_PRESETS[name])
+            self._build_kernel()
+
+    def clear(self) -> None:
+        """Set all cells to 0."""
+        for r in range(self.height):
+            for c in range(self.width):
+                self.cells[r][c] = 0.0
+
+    def seed_center(self) -> None:
+        """Place a circular seed blob in the center of the grid."""
+        cx, cy = self.width // 2, self.height // 2
+        radius = max(3, self.R)
+        for r in range(self.height):
+            for c in range(self.width):
+                dr = r - cy
+                dc = c - cx
+                dist = math.sqrt(dr * dr + dc * dc)
+                if dist < radius:
+                    # Smooth falloff from center
+                    self.cells[r][c] = max(0.0, 1.0 - (dist / radius) ** 2)
+
+    def randomize(self, density: float = 0.2) -> None:
+        """Fill grid with random continuous values in scattered patches."""
+        self.clear()
+        # Create several random blobs
+        num_blobs = max(3, (self.width * self.height) // 400)
+        for _ in range(num_blobs):
+            cr = random.randint(0, self.height - 1)
+            cc = random.randint(0, self.width - 1)
+            blob_r = random.randint(2, max(3, self.R))
+            for r in range(max(0, cr - blob_r), min(self.height, cr + blob_r + 1)):
+                for c in range(max(0, cc - blob_r), min(self.width, cc + blob_r + 1)):
+                    dr = r - cr
+                    dc = c - cc
+                    dist = math.sqrt(dr * dr + dc * dc)
+                    if dist < blob_r and random.random() < density * 3:
+                        self.cells[r][c] = min(1.0, self.cells[r][c] + random.random() * 0.8)
+
+    def tick(self) -> None:
+        """Advance one Lenia time step."""
+        if self._kernel_sum <= 0:
+            return
+        new = [[0.0] * self.width for _ in range(self.height)]
+        dt = 1.0 / self.T
+        for r in range(self.height):
+            for c in range(self.width):
+                # Compute neighborhood potential (weighted average)
+                potential = 0.0
+                for dr, dc, w in self._kernel:
+                    if self.toroidal:
+                        nr = (r + dr) % self.height
+                        nc = (c + dc) % self.width
+                    else:
+                        nr = r + dr
+                        nc = c + dc
+                        if nr < 0 or nr >= self.height or nc < 0 or nc >= self.width:
+                            continue
+                    potential += self.cells[nr][nc] * w
+                potential /= self._kernel_sum
+                # Growth function
+                growth = 2.0 * self._bell(potential, self.growth_mu, self.growth_sigma) - 1.0
+                # Update with time step
+                new[r][c] = max(0.0, min(1.0, self.cells[r][c] + dt * growth))
+        self.cells = new
+
+    def population(self) -> float:
+        """Return total mass (sum of all cell values)."""
+        return sum(self.cells[r][c] for r in range(self.height) for c in range(self.width))
+
+    def active_count(self) -> int:
+        """Return number of cells with value > 0.01."""
+        return sum(1 for r in range(self.height) for c in range(self.width) if self.cells[r][c] > 0.01)
+
+
+# ---------------------------------------------------------------------------
 # Pattern detector — identifies known still lifes, oscillators, spaceships
 # ---------------------------------------------------------------------------
 
@@ -1086,6 +1248,11 @@ class App:
         self.multistate_type_idx = 0  # 0=Life, 1=Brian's Brain, 2=Wireworld
         self.multistate_grid: MultiStateGrid | None = None
         self.multistate_gen = 0
+        # Lenia (continuous cellular automaton) mode
+        self.lenia_mode = False
+        self.lenia_grid: LeniaGrid | None = None
+        self.lenia_gen = 0
+        self.lenia_preset_idx = 0  # index into LENIA_PRESET_NAMES
         # Wolfram 1D elementary cellular automaton mode
         self.wolfram_mode = False
         self.wolfram_rule = 30  # Wolfram rule number (0-255)
@@ -1108,7 +1275,10 @@ class App:
         while True:
             if not self._handle_input():
                 break
-            if self.wolfram_mode:
+            if self.lenia_mode:
+                if self.running:
+                    self._lenia_tick()
+            elif self.wolfram_mode:
                 if self.running:
                     self._wolfram_tick()
             elif self.multistate_mode:
@@ -1168,6 +1338,12 @@ class App:
             curses.init_pair(21, curses.COLOR_CYAN, -1)    # Wireworld: CONDUCTOR
             curses.init_pair(22, curses.COLOR_WHITE, -1)   # Langton's Ant: BLACK cell
             curses.init_pair(23, curses.COLOR_RED, -1)     # Langton's Ant: ANT
+            # Lenia continuous CA gradient (dark → bright)
+            curses.init_pair(24, curses.COLOR_BLUE, -1)    # Lenia: dim/low
+            curses.init_pair(25, curses.COLOR_CYAN, -1)    # Lenia: low-mid
+            curses.init_pair(26, curses.COLOR_GREEN, -1)   # Lenia: mid
+            curses.init_pair(27, curses.COLOR_YELLOW, -1)  # Lenia: mid-high
+            curses.init_pair(28, curses.COLOR_WHITE, -1)   # Lenia: high/bright
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -1214,6 +1390,10 @@ class App:
         # Wolfram 1D mode has its own input handler
         if self.wolfram_mode:
             return self._handle_wolfram_input(key)
+
+        # Lenia continuous CA mode has its own input handler
+        if self.lenia_mode:
+            return self._handle_lenia_input(key)
 
         # Multi-state automaton mode has its own input handler
         if self.multistate_mode:
@@ -1390,6 +1570,10 @@ class App:
         # Wolfram 1D elementary CA mode
         elif key == ord("W"):
             self._start_wolfram()
+
+        # Lenia continuous CA mode
+        elif key == ord("L"):
+            self._start_lenia()
 
         # Multi-state automaton mode (Brian's Brain / Wireworld)
         elif key == ord("X"):
@@ -1670,6 +1854,189 @@ class App:
         if hi == lo:
             return bars[3] * len(values)
         return "".join(bars[round((v - lo) / (hi - lo) * 7)] for v in values)
+
+    # --- Lenia continuous cellular automaton mode ---
+
+    def _handle_lenia_input(self, key: int) -> bool:
+        """Handle input while in Lenia continuous CA mode."""
+        if key == ord("q"):
+            return False
+        # Run / pause
+        elif key == ord(" "):
+            self.running = not self.running
+        # Step
+        elif key == ord("s"):
+            if not self.running:
+                self._lenia_tick()
+        # Randomize
+        elif key == ord("r"):
+            if self.lenia_grid:
+                self.lenia_grid.randomize()
+                self.lenia_gen = 0
+                self._set_message("Randomized")
+        # Clear
+        elif key == ord("c"):
+            if self.lenia_grid:
+                self.lenia_grid.clear()
+                self.lenia_gen = 0
+                self._set_message("Cleared")
+        # Seed center blob
+        elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
+            if self.lenia_grid:
+                self.lenia_grid.seed_center()
+                self.lenia_gen = 0
+                self._set_message("Seeded center blob")
+        # Cycle preset species with F/G
+        elif key == ord("f"):
+            self.lenia_preset_idx = (self.lenia_preset_idx + 1) % len(LENIA_PRESET_NAMES)
+            self._switch_lenia_preset()
+        elif key == ord("g"):
+            self.lenia_preset_idx = (self.lenia_preset_idx - 1) % len(LENIA_PRESET_NAMES)
+            self._switch_lenia_preset()
+        # Speed control
+        elif key in (ord("+"), ord("="), ord("]")):
+            self.speed = min(20, self.speed + 1)
+            self._update_timeout()
+        elif key in (ord("-"), ord("_"), ord("[")):
+            self.speed = max(1, self.speed - 1)
+            self._update_timeout()
+        # Toroidal toggle
+        elif key == ord("t"):
+            if self.lenia_grid:
+                self.lenia_grid.toroidal = not self.lenia_grid.toroidal
+                mode = "ON" if self.lenia_grid.toroidal else "OFF"
+                self._set_message(f"Toroidal wrapping {mode}")
+        # Exit Lenia mode
+        elif key == ord("L") or key == 27:
+            self._stop_lenia()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_lenia(self) -> None:
+        """Enter Lenia continuous CA mode."""
+        self.running = False
+        self.lenia_mode = True
+        self.lenia_gen = 0
+        self.lenia_preset_idx = 0
+        max_h, max_w = self.stdscr.getmaxyx()
+        w = max(1, max_w // 2)
+        h = max(1, max_h - 3)
+        self.lenia_grid = LeniaGrid(w, h)
+        self.lenia_grid.seed_center()
+        preset = LENIA_PRESET_NAMES[self.lenia_preset_idx]
+        self._set_message(
+            f"LENIA — {preset} | [F/G]Species [Space]Run [S]tep [R]and [Enter]Seed [L]Exit"
+        )
+
+    def _stop_lenia(self) -> None:
+        """Exit Lenia mode."""
+        self.lenia_mode = False
+        self.running = False
+        self.lenia_grid = None
+        self.lenia_gen = 0
+        self._set_message("Lenia mode ended")
+
+    def _switch_lenia_preset(self) -> None:
+        """Switch to a different Lenia preset species."""
+        preset = LENIA_PRESET_NAMES[self.lenia_preset_idx]
+        if self.lenia_grid:
+            self.lenia_grid.apply_preset(preset)
+            self.lenia_grid.clear()
+            self.lenia_grid.seed_center()
+        self.lenia_gen = 0
+        self.running = False
+        self._set_message(
+            f"LENIA — {preset} | R={self.lenia_grid.R} T={self.lenia_grid.T}"
+            if self.lenia_grid else f"LENIA — {preset}"
+        )
+
+    def _lenia_tick(self) -> None:
+        """Advance one Lenia generation."""
+        if self.lenia_grid:
+            self.lenia_grid.tick()
+            self.lenia_gen += 1
+
+    def _lenia_cell_attr(self, value: float) -> tuple[str, int]:
+        """Return (shade_char, curses attr) for a Lenia cell value in [0, 1]."""
+        if value < 0.01:
+            return "  ", 0
+        # Map to shade index (1-4, skipping 0=space)
+        idx = min(4, max(1, int(value * 4.99)))
+        shade = LENIA_SHADES[idx]
+        ch = shade + shade  # double-wide for square cells
+        # Color gradient based on intensity
+        if value < 0.2:
+            pair = 24  # blue/dim
+            extra = curses.A_DIM
+        elif value < 0.4:
+            pair = 25  # cyan
+            extra = 0
+        elif value < 0.6:
+            pair = 26  # green
+            extra = 0
+        elif value < 0.8:
+            pair = 27  # yellow
+            extra = 0
+        else:
+            pair = 28  # white/bright
+            extra = curses.A_BOLD
+        attr = (curses.color_pair(pair) | extra) if self.use_color else extra
+        return ch, attr
+
+    def _draw_lenia(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the Lenia continuous CA grid."""
+        if not self.lenia_grid:
+            return
+        lg = self.lenia_grid
+
+        for screen_r in range(min(grid_rows, lg.height)):
+            for screen_c in range(min(grid_cols, lg.width)):
+                x = screen_c * 2
+                if x + 1 >= max_w:
+                    break
+                value = lg.cells[screen_r][screen_c]
+                ch, attr = self._lenia_cell_attr(value)
+                try:
+                    self.stdscr.addstr(screen_r, x, ch, attr)
+                except curses.error:
+                    pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            preset = LENIA_PRESET_NAMES[self.lenia_preset_idx]
+            state_str = "RUNNING" if self.running else "PAUSED"
+            topo = "Torus" if lg.toroidal else "Bounded"
+            mass = lg.population()
+            active = lg.active_count()
+            status = (
+                f" Lenia: {preset} | Gen: {self.lenia_gen} | "
+                f"Mass: {mass:.1f} Active: {active} | "
+                f"R={lg.R} T={lg.T} | Speed: {self.speed} | {topo} | {state_str} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            preset = LENIA_PRESET_NAMES[self.lenia_preset_idx]
+            help_text = (
+                f" [Space]Run [S]tep [R]and [C]lear [Enter]Seed | "
+                f"[F/G]Species:{preset} | "
+                f"░▒▓█ intensity | [+/-]Spd [T]orus [L]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
 
     # --- Wolfram 1D elementary cellular automaton mode ---
 
@@ -2261,7 +2628,9 @@ class App:
         grid_rows = max(1, max_h - 3)
         grid_cols = max(1, max_w // 2)
 
-        if self.wolfram_mode:
+        if self.lenia_mode:
+            self._draw_lenia(max_h, max_w, grid_rows, grid_cols)
+        elif self.wolfram_mode:
             self._draw_wolfram(max_h, max_w, grid_rows, grid_cols)
         elif self.multistate_mode:
             self._draw_multistate(max_h, max_w, grid_rows, grid_cols)
