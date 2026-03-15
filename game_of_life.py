@@ -2269,6 +2269,294 @@ class IsingWorld:
 
 
 # ---------------------------------------------------------------------------
+# Neural Cellular Automata (NCA) — learned update rules
+# ---------------------------------------------------------------------------
+
+NCA_PRESETS = {
+    "grow": (
+        0.15, 0.05, 3, "sigmoid", True,
+        "Grow — pattern expands from a central seed",
+    ),
+    "persist": (
+        0.10, 0.02, 4, "tanh", False,
+        "Persist — stable pattern maintains shape",
+    ),
+    "morphogenesis": (
+        0.08, 0.12, 3, "relu", False,
+        "Morphogenesis — Turing-like emergent structure",
+    ),
+    "regenerate": (
+        0.12, 0.04, 4, "sigmoid", True,
+        "Regenerate — self-repairs when cells are erased",
+    ),
+}
+NCA_PRESET_NAMES = list(NCA_PRESETS.keys())
+
+# Sobel perception kernels (3x3) — dx and dy
+_SOBEL_X = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+_SOBEL_Y = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
+# Identity kernel for self-perception
+_IDENTITY = [[0, 0, 0], [0, 1, 0], [0, 0, 0]]
+
+
+class NCAWorld:
+    """Neural Cellular Automata simulation.
+
+    Each cell has multiple continuous state channels updated by a small MLP
+    operating on Sobel-filtered perception vectors.  This produces
+    self-organising, self-repairing patterns from simple learned rules.
+
+    Based on the 'Growing Neural Cellular Automata' paradigm (Mordvintsev
+    et al.), but using hand-tuned pseudo-learned weights for compelling
+    terminal visualisation without requiring actual training.
+    """
+
+    def __init__(self, width: int, height: int, n_channels: int = 4,
+                 preset: str = "grow"):
+        self.width = width
+        self.height = height
+        self.n_channels = n_channels
+        self.preset_idx = NCA_PRESET_NAMES.index(preset)
+
+        # State grid: height × width × n_channels (channel 0 = alpha/alive)
+        self.state: list[list[list[float]]] = [
+            [[0.0] * n_channels for _ in range(width)]
+            for _ in range(height)
+        ]
+
+        # MLP weights (randomly initialised per preset seed)
+        self.hidden_size = 16
+        self.w1: list[list[float]] = []  # perception_dim × hidden_size
+        self.b1: list[float] = []
+        self.w2: list[list[float]] = []  # hidden_size × n_channels
+        self.b2: list[float] = []
+
+        # Parameters
+        self.update_rate = 0.15   # fraction of cells updated per step
+        self.noise_amp = 0.05    # noise amplitude
+        self.mlp_layers = 3
+        self.activation = "sigmoid"
+        self.use_seed = True
+        self.alive_threshold = 0.1
+
+        self._apply_preset(preset)
+        self._init_weights()
+        self.seed_center()
+
+    def _apply_preset(self, name: str) -> None:
+        if name not in NCA_PRESETS:
+            name = "grow"
+        update_rate, noise_amp, mlp_layers, activation, use_seed, _desc = NCA_PRESETS[name]
+        self.update_rate = update_rate
+        self.noise_amp = noise_amp
+        self.mlp_layers = mlp_layers
+        self.activation = activation
+        self.use_seed = use_seed
+
+    def cycle_preset(self, direction: int = 1) -> str:
+        self.preset_idx = (self.preset_idx + direction) % len(NCA_PRESET_NAMES)
+        name = NCA_PRESET_NAMES[self.preset_idx]
+        self._apply_preset(name)
+        self._init_weights()
+        self.reset()
+        return name
+
+    def _init_weights(self) -> None:
+        """Initialise MLP weights with deterministic seed per preset."""
+        rng = random.Random(42 + self.preset_idx * 137)
+        nc = self.n_channels
+        # Perception produces 3*nc features (identity + sobel_x + sobel_y)
+        perc_dim = 3 * nc
+        hs = self.hidden_size
+
+        # Xavier-like init scaled by layer count
+        scale1 = (2.0 / (perc_dim + hs)) ** 0.5
+        scale2 = (2.0 / (hs + nc)) ** 0.5
+
+        self.w1 = [[rng.gauss(0, scale1) for _ in range(hs)] for _ in range(perc_dim)]
+        self.b1 = [rng.gauss(0, 0.1) for _ in range(hs)]
+        self.w2 = [[rng.gauss(0, scale2) for _ in range(nc)] for _ in range(hs)]
+        self.b2 = [rng.gauss(0, 0.01) for _ in range(nc)]
+
+    def _activate(self, x: float) -> float:
+        """Apply activation function."""
+        if self.activation == "sigmoid":
+            ex = max(-20.0, min(20.0, x))
+            return 1.0 / (1.0 + math.exp(-ex))
+        elif self.activation == "tanh":
+            return math.tanh(x)
+        else:  # relu
+            return max(0.0, x)
+
+    def _perceive(self, y: int, x: int) -> list[float]:
+        """Compute Sobel-filtered perception vector for cell (y, x)."""
+        w, h, nc = self.width, self.height, self.n_channels
+        result: list[float] = []
+        for c in range(nc):
+            ident = 0.0
+            sx = 0.0
+            sy = 0.0
+            for dy in range(-1, 2):
+                for dx in range(-1, 2):
+                    ny = (y + dy) % h
+                    nx = (x + dx) % w
+                    val = self.state[ny][nx][c]
+                    ky = dy + 1
+                    kx = dx + 1
+                    ident += val * _IDENTITY[ky][kx]
+                    sx += val * _SOBEL_X[ky][kx]
+                    sy += val * _SOBEL_Y[ky][kx]
+            result.append(ident)
+            result.append(sx / 8.0)  # normalise Sobel
+            result.append(sy / 8.0)
+        return result
+
+    def _mlp_forward(self, perception: list[float]) -> list[float]:
+        """Run perception through the MLP to get state update delta."""
+        nc = self.n_channels
+        hs = self.hidden_size
+
+        # Hidden layer
+        hidden = [0.0] * hs
+        for j in range(hs):
+            s = self.b1[j]
+            for i in range(len(perception)):
+                s += perception[i] * self.w1[i][j]
+            hidden[j] = self._activate(s)
+
+        # Output layer (produces delta for each channel)
+        delta = [0.0] * nc
+        for j in range(nc):
+            s = self.b2[j]
+            for i in range(hs):
+                s += hidden[i] * self.w2[i][j]
+            # Output through tanh to keep updates bounded
+            delta[j] = math.tanh(s)
+        return delta
+
+    def seed_center(self) -> None:
+        """Place a seed pattern at the centre of the grid."""
+        cy, cx = self.height // 2, self.width // 2
+        nc = self.n_channels
+        for dy in range(-2, 3):
+            for dx in range(-2, 3):
+                y = (cy + dy) % self.height
+                x = (cx + dx) % self.width
+                dist = (dy * dy + dx * dx) ** 0.5
+                val = max(0.0, 1.0 - dist / 3.0)
+                self.state[y][x][0] = val  # alpha channel
+                for c in range(1, nc):
+                    self.state[y][x][c] = val * (0.5 + 0.5 * math.sin(c * 1.5 + dist))
+
+    def reset(self) -> None:
+        """Clear grid and re-seed."""
+        for y in range(self.height):
+            for x in range(self.width):
+                for c in range(self.n_channels):
+                    self.state[y][x][c] = 0.0
+        if self.use_seed:
+            self.seed_center()
+        else:
+            # Morphogenesis / persist: start with low random noise
+            rng = random.Random()
+            for y in range(self.height):
+                for x in range(self.width):
+                    self.state[y][x][0] = rng.uniform(0.05, 0.15)
+                    for c in range(1, self.n_channels):
+                        self.state[y][x][c] = rng.uniform(-0.1, 0.1)
+
+    def erase_circle(self, cy: int, cx: int, radius: int = 3) -> None:
+        """Erase cells in a circle around (cy, cx) for interactive perturbation."""
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if dy * dy + dx * dx <= radius * radius:
+                    y = (cy + dy) % self.height
+                    x = (cx + dx) % self.width
+                    for c in range(self.n_channels):
+                        self.state[y][x][c] = 0.0
+
+    def paint_circle(self, cy: int, cx: int, radius: int = 2) -> None:
+        """Paint alive cells in a circle around (cy, cx)."""
+        nc = self.n_channels
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if dy * dy + dx * dx <= radius * radius:
+                    y = (cy + dy) % self.height
+                    x = (cx + dx) % self.width
+                    dist = (dy * dy + dx * dx) ** 0.5
+                    val = max(0.0, 1.0 - dist / (radius + 0.5))
+                    self.state[y][x][0] = max(self.state[y][x][0], val)
+                    for c in range(1, nc):
+                        self.state[y][x][c] = val * 0.5
+
+    def tick(self) -> None:
+        """Advance NCA by one step with stochastic cell updates."""
+        w, h, nc = self.width, self.height, self.n_channels
+        rand = random.random
+
+        # Compute updates for all cells, apply stochastically
+        # Pre-compute which cells to update (stochastic masking)
+        updates: list[tuple[int, int, list[float]]] = []
+        for y in range(h):
+            for x in range(w):
+                if rand() > self.update_rate:
+                    continue
+                # Perceive neighbourhood
+                perc = self._perceive(y, x)
+                # MLP forward pass
+                delta = self._mlp_forward(perc)
+                updates.append((y, x, delta))
+
+        # Apply updates
+        for y, x, delta in updates:
+            for c in range(nc):
+                noise = (rand() - 0.5) * self.noise_amp
+                self.state[y][x][c] += delta[c] * 0.1 + noise
+                # Clamp
+                self.state[y][x][c] = max(-1.0, min(1.0, self.state[y][x][c]))
+
+        # Alive masking: cells with alpha < threshold die
+        for y in range(h):
+            for x in range(w):
+                if self.state[y][x][0] < self.alive_threshold:
+                    # Check if any neighbour is alive
+                    has_alive_neighbour = False
+                    for dy in range(-1, 2):
+                        for dx in range(-1, 2):
+                            if dy == 0 and dx == 0:
+                                continue
+                            ny = (y + dy) % h
+                            nx = (x + dx) % w
+                            if self.state[ny][nx][0] >= self.alive_threshold:
+                                has_alive_neighbour = True
+                                break
+                        if has_alive_neighbour:
+                            break
+                    if not has_alive_neighbour:
+                        for c in range(nc):
+                            self.state[y][x][c] = 0.0
+
+    @property
+    def alive_count(self) -> int:
+        """Count cells with alpha above threshold."""
+        count = 0
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.state[y][x][0] >= self.alive_threshold:
+                    count += 1
+        return count
+
+    @property
+    def mean_alpha(self) -> float:
+        """Average alpha channel value."""
+        total = 0.0
+        for y in range(self.height):
+            for x in range(self.width):
+                total += max(0.0, self.state[y][x][0])
+        return total / max(1, self.width * self.height)
+
+
+# ---------------------------------------------------------------------------
 # Pattern detector — identifies known still lifes, oscillators, spaceships
 # ---------------------------------------------------------------------------
 
@@ -2825,6 +3113,16 @@ class App:
         self.boids_world: BoidsWorld | None = None
         self.boids_gen = 0
         self.boids_preset_idx = 0
+        # Neural Cellular Automata (NCA) mode
+        self.nca_mode = False
+        self.nca_world: NCAWorld | None = None
+        self.nca_gen = 0
+        self.nca_preset_idx = 0
+        self.nca_cursor_x = 0
+        self.nca_cursor_y = 0
+        self.nca_painting = False   # True while painting cells
+        self.nca_erasing = False    # True while erasing cells
+        self.nca_brush_size = 2     # brush radius
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -2874,6 +3172,9 @@ class App:
             elif self.boids_mode:
                 if self.running:
                     self._boids_tick()
+            elif self.nca_mode:
+                if self.running:
+                    self._nca_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -2979,6 +3280,13 @@ class App:
             curses.init_pair(63, curses.COLOR_YELLOW, -1)  # Boids: heading up
             curses.init_pair(64, curses.COLOR_RED, -1)     # Boids: heading left
             curses.init_pair(65, curses.COLOR_MAGENTA, -1) # Boids: heading down
+            # NCA channel-based colors
+            curses.init_pair(70, curses.COLOR_GREEN, -1)   # NCA: low alpha
+            curses.init_pair(71, curses.COLOR_CYAN, -1)    # NCA: medium alpha
+            curses.init_pair(72, curses.COLOR_YELLOW, -1)  # NCA: high alpha
+            curses.init_pair(73, curses.COLOR_WHITE, -1)   # NCA: full alpha
+            curses.init_pair(74, curses.COLOR_MAGENTA, -1) # NCA: channel highlight
+            curses.init_pair(75, curses.COLOR_RED, -1)     # NCA: cursor
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -3065,6 +3373,10 @@ class App:
         # Boids flocking mode has its own input handler
         if self.boids_mode:
             return self._handle_boids_input(key)
+
+        # Neural Cellular Automata mode has its own input handler
+        if self.nca_mode:
+            return self._handle_nca_input(key)
 
         # Split mode has limited input
         if self.split_mode:
@@ -3277,6 +3589,10 @@ class App:
         # Boids flocking simulation mode
         elif key == ord("B"):
             self._start_boids()
+
+        # Neural Cellular Automata mode
+        elif key == ord("N"):
+            self._start_nca()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -5534,6 +5850,233 @@ class App:
             except curses.error:
                 pass
 
+    # --- NCA (Neural Cellular Automata) mode ---
+
+    def _handle_nca_input(self, key: int) -> bool:
+        """Handle input while in NCA mode."""
+        if key == ord("q"):
+            return False
+        elif key == ord(" "):
+            self.running = not self.running
+        elif key == ord("s"):
+            if not self.running:
+                self._nca_tick()
+        elif key == ord("r"):
+            if self.nca_world:
+                self.nca_world.reset()
+                self.nca_gen = 0
+                self._set_message("Reset NCA")
+        # Cycle presets
+        elif key == ord("p") or key == ord("n"):
+            if self.nca_world:
+                direction = 1 if key == ord("n") else -1
+                name = self.nca_world.cycle_preset(direction)
+                self.nca_preset_idx = self.nca_world.preset_idx
+                self.nca_gen = 0
+                self._set_message(f"Preset: {name}")
+        # Cursor movement for painting/erasing
+        elif key in (curses.KEY_UP, ord("k")):
+            self.nca_cursor_y = max(0, self.nca_cursor_y - 1)
+            if self.nca_painting and self.nca_world:
+                self.nca_world.paint_circle(self.nca_cursor_y, self.nca_cursor_x, self.nca_brush_size)
+            elif self.nca_erasing and self.nca_world:
+                self.nca_world.erase_circle(self.nca_cursor_y, self.nca_cursor_x, self.nca_brush_size)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            max_h, _ = self.stdscr.getmaxyx()
+            self.nca_cursor_y = min(max_h - 4, self.nca_cursor_y + 1)
+            if self.nca_painting and self.nca_world:
+                self.nca_world.paint_circle(self.nca_cursor_y, self.nca_cursor_x, self.nca_brush_size)
+            elif self.nca_erasing and self.nca_world:
+                self.nca_world.erase_circle(self.nca_cursor_y, self.nca_cursor_x, self.nca_brush_size)
+        elif key in (curses.KEY_LEFT, ord("h")):
+            self.nca_cursor_x = max(0, self.nca_cursor_x - 1)
+            if self.nca_painting and self.nca_world:
+                self.nca_world.paint_circle(self.nca_cursor_y, self.nca_cursor_x, self.nca_brush_size)
+            elif self.nca_erasing and self.nca_world:
+                self.nca_world.erase_circle(self.nca_cursor_y, self.nca_cursor_x, self.nca_brush_size)
+        elif key in (curses.KEY_RIGHT, ord("l")):
+            _, max_w = self.stdscr.getmaxyx()
+            self.nca_cursor_x = min(max_w // 2 - 1, self.nca_cursor_x + 1)
+            if self.nca_painting and self.nca_world:
+                self.nca_world.paint_circle(self.nca_cursor_y, self.nca_cursor_x, self.nca_brush_size)
+            elif self.nca_erasing and self.nca_world:
+                self.nca_world.erase_circle(self.nca_cursor_y, self.nca_cursor_x, self.nca_brush_size)
+        # Paint mode toggle
+        elif key == ord("x"):
+            self.nca_painting = not self.nca_painting
+            self.nca_erasing = False
+            if self.nca_painting and self.nca_world:
+                self.nca_world.paint_circle(self.nca_cursor_y, self.nca_cursor_x, self.nca_brush_size)
+            self._set_message("Paint ON" if self.nca_painting else "Paint OFF")
+        # Erase mode toggle
+        elif key == ord("e"):
+            self.nca_erasing = not self.nca_erasing
+            self.nca_painting = False
+            if self.nca_erasing and self.nca_world:
+                self.nca_world.erase_circle(self.nca_cursor_y, self.nca_cursor_x, self.nca_brush_size)
+            self._set_message("Erase ON" if self.nca_erasing else "Erase OFF")
+        # Brush size
+        elif key == ord("]"):
+            self.nca_brush_size = min(8, self.nca_brush_size + 1)
+            self._set_message(f"Brush: {self.nca_brush_size}")
+        elif key == ord("["):
+            self.nca_brush_size = max(1, self.nca_brush_size - 1)
+            self._set_message(f"Brush: {self.nca_brush_size}")
+        # Adjust update rate
+        elif key == ord(","):
+            if self.nca_world:
+                self.nca_world.update_rate = max(0.02, self.nca_world.update_rate - 0.02)
+                self._set_message(f"Update rate: {self.nca_world.update_rate:.2f}")
+        elif key == ord("."):
+            if self.nca_world:
+                self.nca_world.update_rate = min(1.0, self.nca_world.update_rate + 0.02)
+                self._set_message(f"Update rate: {self.nca_world.update_rate:.2f}")
+        # Adjust noise
+        elif key == ord("-"):
+            if self.nca_world:
+                self.nca_world.noise_amp = max(0.0, self.nca_world.noise_amp - 0.01)
+                self._set_message(f"Noise: {self.nca_world.noise_amp:.2f}")
+        elif key == ord("="):
+            if self.nca_world:
+                self.nca_world.noise_amp = min(0.5, self.nca_world.noise_amp + 0.01)
+                self._set_message(f"Noise: {self.nca_world.noise_amp:.2f}")
+        # Speed control
+        elif key == ord("f"):
+            self.speed = min(20, self.speed + 1)
+            self._update_timeout()
+        elif key == ord("d"):
+            self.speed = max(1, self.speed - 1)
+            self._update_timeout()
+        # Exit NCA mode
+        elif key == ord("N") or key == 27:
+            self._stop_nca()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_nca(self) -> None:
+        """Enter Neural Cellular Automata mode."""
+        self.running = False
+        self.nca_mode = True
+        self.nca_gen = 0
+        max_h, max_w = self.stdscr.getmaxyx()
+        w = max(10, max_w // 2)
+        h = max(10, max_h - 3)
+        self.nca_cursor_x = w // 2
+        self.nca_cursor_y = h // 2
+        preset = NCA_PRESET_NAMES[self.nca_preset_idx]
+        self.nca_world = NCAWorld(w, h, preset=preset)
+        self._set_message(
+            "Neural CA — [Space]Run [X]Paint [E]rase [P/N]Preset [Shift+N]Exit"
+        )
+
+    def _stop_nca(self) -> None:
+        """Exit Neural Cellular Automata mode."""
+        self.nca_mode = False
+        self.running = False
+        self.nca_world = None
+        self.nca_gen = 0
+        self.nca_painting = False
+        self.nca_erasing = False
+        self._set_message("NCA mode ended")
+
+    def _nca_tick(self) -> None:
+        """Advance one NCA generation."""
+        if self.nca_world:
+            self.nca_world.tick()
+            self.nca_gen += 1
+
+    def _draw_nca(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the Neural Cellular Automata simulation."""
+        if not self.nca_world:
+            return
+        nw = self.nca_world
+
+        # Density characters from sparse to dense
+        density_chars = " ·░▒▓█"
+
+        for y in range(min(grid_rows, nw.height)):
+            for x in range(min(grid_cols, nw.width)):
+                alpha = nw.state[y][x][0]
+                if alpha < 0.02:
+                    continue
+
+                # Map alpha to density character
+                idx = int(max(0.0, min(1.0, alpha)) * (len(density_chars) - 1))
+                ch = density_chars[idx]
+
+                # Color based on channel values
+                if self.use_color:
+                    if alpha >= 0.8:
+                        attr = curses.color_pair(73) | curses.A_BOLD
+                    elif alpha >= 0.5:
+                        attr = curses.color_pair(72)
+                    elif alpha >= 0.25:
+                        attr = curses.color_pair(71)
+                    else:
+                        attr = curses.color_pair(70)
+                    # Use channel 1 for color variation
+                    if nw.n_channels > 1 and abs(nw.state[y][x][1]) > 0.3:
+                        attr = curses.color_pair(74)
+                else:
+                    attr = curses.A_BOLD if alpha > 0.5 else 0
+
+                sc = x * 2  # each cell is 2 chars wide
+                if sc + 1 < max_w and y < grid_rows:
+                    try:
+                        self.stdscr.addstr(y, sc, ch + ch, attr)
+                    except curses.error:
+                        pass
+
+        # Draw cursor
+        cx_screen = self.nca_cursor_x * 2
+        cy_screen = self.nca_cursor_y
+        if cy_screen < grid_rows and cx_screen + 1 < max_w:
+            cursor_ch = "██" if self.nca_painting else ("░░" if self.nca_erasing else "[]")
+            attr = curses.color_pair(75) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(cy_screen, cx_screen, cursor_ch, attr)
+            except curses.error:
+                pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            preset_name = NCA_PRESET_NAMES[nw.preset_idx]
+            state_str = "RUNNING" if self.running else "PAUSED"
+            mode_str = ""
+            if self.nca_painting:
+                mode_str = " [PAINT]"
+            elif self.nca_erasing:
+                mode_str = " [ERASE]"
+            status = (
+                f" NCA | Gen: {self.nca_gen} | "
+                f"Alive: {nw.alive_count} | "
+                f"Rate={nw.update_rate:.2f} Noise={nw.noise_amp:.2f} | "
+                f"Preset: {preset_name} | Speed: {self.speed} | {state_str}{mode_str} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            help_text = (
+                " [Space]Run [S]tep [R]eset | "
+                "[X]Paint [E]rase [Arrows]Move [\\[/\\]]Brush | "
+                "[,/.]Rate [-/=]Noise [P/N]Preset | [Shift+N]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -5877,6 +6420,8 @@ class App:
             self._draw_ising(max_h, max_w, grid_rows, grid_cols)
         elif self.boids_mode:
             self._draw_boids(max_h, max_w, grid_rows, grid_cols)
+        elif self.nca_mode:
+            self._draw_nca(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
