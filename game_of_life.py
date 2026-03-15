@@ -4966,6 +4966,340 @@ class FractalWorld:
         }
 
 
+ATTRACTOR_PRESETS = {
+    "lorenz-classic": {
+        "type": "lorenz",
+        "sigma": 10.0,
+        "rho": 28.0,
+        "beta": 8.0 / 3.0,
+        "dt": 0.005,
+        "steps_per_tick": 50,
+        "trail_len": 8000,
+    },
+    "lorenz-chaotic": {
+        "type": "lorenz",
+        "sigma": 10.0,
+        "rho": 99.96,
+        "beta": 8.0 / 3.0,
+        "dt": 0.003,
+        "steps_per_tick": 60,
+        "trail_len": 10000,
+    },
+    "rossler-classic": {
+        "type": "rossler",
+        "a": 0.2,
+        "b": 0.2,
+        "c": 5.7,
+        "dt": 0.01,
+        "steps_per_tick": 40,
+        "trail_len": 8000,
+    },
+    "rossler-funnel": {
+        "type": "rossler",
+        "a": 0.2,
+        "b": 0.2,
+        "c": 14.0,
+        "dt": 0.005,
+        "steps_per_tick": 50,
+        "trail_len": 10000,
+    },
+    "henon": {
+        "type": "henon",
+        "a": 1.4,
+        "b": 0.3,
+        "dt": 1.0,
+        "steps_per_tick": 200,
+        "trail_len": 20000,
+    },
+    "henon-wide": {
+        "type": "henon",
+        "a": 1.2,
+        "b": 0.3,
+        "dt": 1.0,
+        "steps_per_tick": 200,
+        "trail_len": 25000,
+    },
+}
+ATTRACTOR_PRESET_NAMES = list(ATTRACTOR_PRESETS.keys())
+
+ATTRACTOR_PALETTES = ["heat", "electric", "ice", "grayscale"]
+
+
+class AttractorWorld:
+    """Strange Attractor visualization — Lorenz, Rössler, and Hénon attractors."""
+
+    def __init__(self, width: int, height: int, preset: str = "lorenz-classic"):
+        self.width = width
+        self.height = height
+        self.preset_idx = ATTRACTOR_PRESET_NAMES.index(preset)
+        self.palette_idx = 0
+
+        # Attractor type and parameters
+        self.attractor_type = "lorenz"
+        self.sigma = 10.0
+        self.rho = 28.0
+        self.beta = 8.0 / 3.0
+        # Rössler params
+        self.a = 0.2
+        self.b = 0.2
+        self.c = 5.7
+        # Hénon params
+        self.henon_a = 1.4
+        self.henon_b = 0.3
+
+        self.dt = 0.005
+        self.steps_per_tick = 50
+        self.trail_len = 8000
+
+        # State
+        self.x, self.y, self.z = 1.0, 1.0, 1.0
+        self.trail: list[tuple[float, float, float]] = []
+        self.density: list[list[int]] = [[0] * width for _ in range(height)]
+        self.max_density = 1
+        self.total_steps = 0
+
+        # View rotation (for 3D attractors)
+        self.rot_angle = 0.0  # radians around Y axis
+        self.auto_rotate = True
+        self.rot_speed = 0.02
+
+        # Zoom / pan
+        self.view_scale = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+
+        self._apply_preset(preset)
+
+    def _apply_preset(self, name: str) -> None:
+        cfg = ATTRACTOR_PRESETS[name]
+        self.attractor_type = cfg["type"]
+        self.dt = cfg["dt"]
+        self.steps_per_tick = cfg["steps_per_tick"]
+        self.trail_len = cfg["trail_len"]
+        if self.attractor_type == "lorenz":
+            self.sigma = cfg["sigma"]
+            self.rho = cfg["rho"]
+            self.beta = cfg["beta"]
+            self.x, self.y, self.z = 1.0, 1.0, 1.0
+        elif self.attractor_type == "rossler":
+            self.a = cfg["a"]
+            self.b = cfg["b"]
+            self.c = cfg["c"]
+            self.x, self.y, self.z = 1.0, 1.0, 1.0
+        elif self.attractor_type == "henon":
+            self.henon_a = cfg["a"]
+            self.henon_b = cfg["b"]
+            self.x, self.y = 0.1, 0.1
+            self.z = 0.0
+        self.trail.clear()
+        self.total_steps = 0
+        self.rot_angle = 0.0
+        self._clear_density()
+
+    def _clear_density(self) -> None:
+        for r in range(self.height):
+            for c in range(self.width):
+                self.density[r][c] = 0
+        self.max_density = 1
+
+    def cycle_preset(self, direction: int = 1) -> str:
+        self.preset_idx = (self.preset_idx + direction) % len(ATTRACTOR_PRESET_NAMES)
+        name = ATTRACTOR_PRESET_NAMES[self.preset_idx]
+        self._apply_preset(name)
+        return name
+
+    def cycle_palette(self, direction: int = 1) -> str:
+        self.palette_idx = (self.palette_idx + direction) % len(ATTRACTOR_PALETTES)
+        return ATTRACTOR_PALETTES[self.palette_idx]
+
+    def reset(self) -> None:
+        self._apply_preset(ATTRACTOR_PRESET_NAMES[self.preset_idx])
+        self.view_scale = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+
+    def _step_lorenz(self) -> None:
+        dt = self.dt
+        dx = self.sigma * (self.y - self.x) * dt
+        dy = (self.x * (self.rho - self.z) - self.y) * dt
+        dz = (self.x * self.y - self.beta * self.z) * dt
+        self.x += dx
+        self.y += dy
+        self.z += dz
+
+    def _step_rossler(self) -> None:
+        dt = self.dt
+        dx = (-self.y - self.z) * dt
+        dy = (self.x + self.a * self.y) * dt
+        dz = (self.b + self.z * (self.x - self.c)) * dt
+        self.x += dx
+        self.y += dy
+        self.z += dz
+
+    def _step_henon(self) -> None:
+        xn = 1.0 - self.henon_a * self.x * self.x + self.y
+        yn = self.henon_b * self.x
+        self.x, self.y = xn, yn
+        self.z = 0.0
+
+    def _project(self, px: float, py: float, pz: float) -> tuple[int, int]:
+        """Project a 3D point to 2D grid coordinates with rotation."""
+        if self.attractor_type == "henon":
+            # 2D attractor, just scale directly
+            sx = px * self.view_scale + self.pan_x
+            sy = py * self.view_scale + self.pan_y
+        else:
+            # Rotate around Y axis
+            cos_a = math.cos(self.rot_angle)
+            sin_a = math.sin(self.rot_angle)
+            rx = px * cos_a + pz * sin_a
+            ry = py
+            sx = rx * self.view_scale + self.pan_x
+            sy = ry * self.view_scale + self.pan_y
+
+        # Map to grid
+        if self.attractor_type == "lorenz":
+            # Lorenz: x ~ [-20,20], y ~ [-30,30], z ~ [0,50]
+            col = int(self.width / 2 + sx * self.width / 50)
+            row = int(self.height - sy * self.height / 60)
+        elif self.attractor_type == "rossler":
+            # Rössler: x,y ~ [-15,15], z ~ [0,25]
+            col = int(self.width / 2 + sx * self.width / 40)
+            row = int(self.height / 2 - sy * self.height / 40)
+        else:
+            # Hénon: x ~ [-1.5,1.5], y ~ [-0.4,0.4]
+            col = int(self.width / 2 + sx * self.width / 4)
+            row = int(self.height / 2 - sy * self.height / 1.2)
+        return row, col
+
+    def tick(self) -> None:
+        step_fn = {
+            "lorenz": self._step_lorenz,
+            "rossler": self._step_rossler,
+            "henon": self._step_henon,
+        }[self.attractor_type]
+
+        for _ in range(self.steps_per_tick):
+            step_fn()
+            # Check for divergence
+            if abs(self.x) > 1e6 or abs(self.y) > 1e6 or abs(self.z) > 1e6:
+                self.x, self.y, self.z = 1.0, 1.0, 1.0
+                self.trail.clear()
+                self._clear_density()
+                break
+            self.trail.append((self.x, self.y, self.z))
+            self.total_steps += 1
+
+        # Trim trail
+        if len(self.trail) > self.trail_len:
+            self.trail = self.trail[-self.trail_len:]
+
+        # Auto-rotate for 3D attractors
+        if self.auto_rotate and self.attractor_type != "henon":
+            self.rot_angle += self.rot_speed
+
+        # Rebuild density map from trail
+        self._clear_density()
+        for px, py, pz in self.trail:
+            r, c = self._project(px, py, pz)
+            if 0 <= r < self.height and 0 <= c < self.width:
+                self.density[r][c] += 1
+                if self.density[r][c] > self.max_density:
+                    self.max_density = self.density[r][c]
+
+    def density_to_char_attr(self, val: int, use_color: bool) -> tuple[str, int]:
+        """Map density value to display character and curses attribute."""
+        if val == 0:
+            return "  ", curses.A_NORMAL
+
+        t = min(1.0, val / max(1, self.max_density * 0.6))
+
+        shades = " ·∙░▒▓█"
+        si = max(1, min(len(shades) - 1, int(t * (len(shades) - 1))))
+        ch = shades[si]
+        # Use double-width for denser shades
+        if si >= 4:
+            ch = shades[si] * 2
+        else:
+            ch = " " + shades[si]
+
+        if not use_color:
+            levels = [curses.A_DIM, curses.A_NORMAL, curses.A_BOLD]
+            return ch, levels[min(2, int(t * 3))]
+
+        palette = ATTRACTOR_PALETTES[self.palette_idx]
+        # Color pairs 200-209
+        if palette == "heat":
+            colors = [200, 201, 202, 203, 204]
+        elif palette == "electric":
+            colors = [205, 206, 207, 205, 206]
+        elif palette == "ice":
+            colors = [208, 209, 208, 209, 208]
+        else:  # grayscale
+            colors = [194, 195, 194, 195, 194]
+
+        ci = min(len(colors) - 1, int(t * (len(colors) - 1)))
+        attr = curses.color_pair(colors[ci])
+        if t > 0.5:
+            attr |= curses.A_BOLD
+
+        return ch, attr
+
+    def adjust_param(self, param: str, delta: float) -> float:
+        """Adjust an attractor parameter and return new value."""
+        if self.attractor_type == "lorenz":
+            if param == "sigma":
+                self.sigma = max(0.1, self.sigma + delta)
+                return self.sigma
+            elif param == "rho":
+                self.rho = max(0.1, self.rho + delta)
+                return self.rho
+            elif param == "beta":
+                self.beta = max(0.1, self.beta + delta)
+                return self.beta
+        elif self.attractor_type == "rossler":
+            if param == "a":
+                self.a = max(0.01, self.a + delta)
+                return self.a
+            elif param == "b":
+                self.b = max(0.01, self.b + delta)
+                return self.b
+            elif param == "c":
+                self.c = max(0.1, self.c + delta)
+                return self.c
+        elif self.attractor_type == "henon":
+            if param == "a":
+                self.henon_a = max(0.1, self.henon_a + delta)
+                return self.henon_a
+            elif param == "b":
+                self.henon_b = max(0.01, self.henon_b + delta)
+                return self.henon_b
+        return 0.0
+
+    def toggle_rotate(self) -> bool:
+        self.auto_rotate = not self.auto_rotate
+        return self.auto_rotate
+
+    @property
+    def stats(self) -> dict:
+        params: dict = {"type": self.attractor_type}
+        if self.attractor_type == "lorenz":
+            params.update({"σ": self.sigma, "ρ": self.rho, "β": round(self.beta, 3)})
+        elif self.attractor_type == "rossler":
+            params.update({"a": self.a, "b": self.b, "c": self.c})
+        else:
+            params.update({"a": self.henon_a, "b": self.henon_b})
+        return {
+            "attractor": self.attractor_type.capitalize(),
+            "params": params,
+            "steps": self.total_steps,
+            "trail": len(self.trail),
+            "max_density": self.max_density,
+            "palette": ATTRACTOR_PALETTES[self.palette_idx],
+            "rotate": self.auto_rotate,
+        }
+
+
 class SIRWorld:
     """Epidemic SIR (Susceptible-Infected-Recovered) grid simulation."""
 
@@ -5948,6 +6282,11 @@ class App:
         self.fractal_world: FractalWorld | None = None
         self.fractal_gen = 0
         self.fractal_preset_idx = 0
+        # Strange Attractor mode
+        self.attractor_mode = False
+        self.attractor_world: AttractorWorld | None = None
+        self.attractor_gen = 0
+        self.attractor_preset_idx = 0
         # Demo Tour (screensaver) state
         self.demo_tour_mode = False
         self.demo_tour_idx = 0          # current index into MENU_MODES
@@ -5990,6 +6329,7 @@ class App:
             ("Algorithms", "Maze Solver (M)", "Procedural maze generation with A* pathfinding", "_start_maze"),
             # --- Mathematics ---
             ("Mathematics", "Fractal Explorer (Z)", "Interactive Mandelbrot & Julia set explorer with zoom/pan", "_start_fractal"),
+            ("Mathematics", "Strange Attractors (A)", "Lorenz, Rössler & Hénon chaotic attractor visualization", "_start_attractor"),
         ]
         # Precompute category boundaries for menu rendering
         self._menu_categories: list[str] = []
@@ -6089,6 +6429,8 @@ class App:
                     self._maze_tick()
             elif self.fractal_mode:
                 self._fractal_tick()
+            elif self.attractor_mode:
+                self._attractor_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -6295,6 +6637,18 @@ class App:
             curses.init_pair(194, curses.COLOR_WHITE, -1)      # Fractal: grayscale light
             curses.init_pair(195, curses.COLOR_WHITE, -1)      # Fractal: grayscale dim
 
+            # Attractor color pairs (200-209)
+            curses.init_pair(200, curses.COLOR_RED, -1)        # Attractor: heat cool
+            curses.init_pair(201, curses.COLOR_YELLOW, -1)     # Attractor: heat warm
+            curses.init_pair(202, curses.COLOR_WHITE, -1)      # Attractor: heat hot
+            curses.init_pair(203, curses.COLOR_RED, -1)        # Attractor: heat bright
+            curses.init_pair(204, curses.COLOR_MAGENTA, -1)    # Attractor: heat peak
+            curses.init_pair(205, curses.COLOR_BLUE, -1)       # Attractor: electric blue
+            curses.init_pair(206, curses.COLOR_CYAN, -1)       # Attractor: electric cyan
+            curses.init_pair(207, curses.COLOR_WHITE, -1)      # Attractor: electric white
+            curses.init_pair(208, curses.COLOR_CYAN, -1)       # Attractor: ice cyan
+            curses.init_pair(209, curses.COLOR_BLUE, -1)       # Attractor: ice blue
+
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
         if age < self.AGE_YOUNG:
@@ -6432,6 +6786,10 @@ class App:
         # Fractal Explorer mode has its own input handler
         if self.fractal_mode:
             return self._handle_fractal_input(key)
+
+        # Strange Attractor mode has its own input handler
+        if self.attractor_mode:
+            return self._handle_attractor_input(key)
 
         # Maze mode has its own input handler
         if self.maze_mode:
@@ -6696,6 +7054,10 @@ class App:
         # Fractal Explorer mode
         elif key == ord("Z"):
             self._start_fractal()
+
+        # Strange Attractor mode
+        elif key == ord("A"):
+            self._start_attractor()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -11454,6 +11816,212 @@ class App:
             except curses.error:
                 pass
 
+    # --- Strange Attractor mode ---
+
+    def _handle_attractor_input(self, key: int) -> bool:
+        """Handle input while in Strange Attractor mode."""
+        if key == ord("q"):
+            return False
+        elif key == ord("c"):
+            if self.attractor_world:
+                name = self.attractor_world.cycle_palette()
+                self._set_message(f"Palette: {name}")
+        elif key == ord("p"):
+            if self.attractor_world:
+                name = self.attractor_world.cycle_preset(-1)
+                self.attractor_preset_idx = self.attractor_world.preset_idx
+                self._set_message(f"Preset: {name}")
+        elif key == ord("n"):
+            if self.attractor_world:
+                name = self.attractor_world.cycle_preset(1)
+                self.attractor_preset_idx = self.attractor_world.preset_idx
+                self._set_message(f"Preset: {name}")
+        elif key == ord("r"):
+            if self.attractor_world:
+                self.attractor_world.reset()
+                self.attractor_gen = 0
+                self._set_message("Reset")
+        elif key == ord(" "):
+            if self.attractor_world:
+                rot = self.attractor_world.toggle_rotate()
+                self._set_message(f"Auto-rotate: {'ON' if rot else 'OFF'}")
+        elif key == ord("+") or key == ord("="):
+            if self.attractor_world:
+                self.attractor_world.view_scale *= 1.2
+                self._set_message(f"Scale: {self.attractor_world.view_scale:.2f}x")
+        elif key == ord("-"):
+            if self.attractor_world:
+                self.attractor_world.view_scale = max(0.1, self.attractor_world.view_scale / 1.2)
+                self._set_message(f"Scale: {self.attractor_world.view_scale:.2f}x")
+        elif key in (curses.KEY_LEFT, ord("h")):
+            if self.attractor_world:
+                self.attractor_world.pan_x -= 2.0
+        elif key in (curses.KEY_RIGHT, ord("l")):
+            if self.attractor_world:
+                self.attractor_world.pan_x += 2.0
+        elif key in (curses.KEY_UP, ord("k")):
+            if self.attractor_world:
+                self.attractor_world.pan_y += 2.0
+        elif key in (curses.KEY_DOWN, ord("j")):
+            if self.attractor_world:
+                self.attractor_world.pan_y -= 2.0
+        elif key == ord("1"):
+            if self.attractor_world:
+                aw = self.attractor_world
+                if aw.attractor_type == "lorenz":
+                    v = aw.adjust_param("sigma", 1.0)
+                    self._set_message(f"σ = {v:.1f}")
+                elif aw.attractor_type == "rossler":
+                    v = aw.adjust_param("a", 0.01)
+                    self._set_message(f"a = {v:.3f}")
+                elif aw.attractor_type == "henon":
+                    v = aw.adjust_param("a", 0.01)
+                    self._set_message(f"a = {v:.3f}")
+        elif key == ord("2"):
+            if self.attractor_world:
+                aw = self.attractor_world
+                if aw.attractor_type == "lorenz":
+                    v = aw.adjust_param("rho", 1.0)
+                    self._set_message(f"ρ = {v:.1f}")
+                elif aw.attractor_type == "rossler":
+                    v = aw.adjust_param("b", 0.01)
+                    self._set_message(f"b = {v:.3f}")
+                elif aw.attractor_type == "henon":
+                    v = aw.adjust_param("b", 0.01)
+                    self._set_message(f"b = {v:.3f}")
+        elif key == ord("3"):
+            if self.attractor_world:
+                aw = self.attractor_world
+                if aw.attractor_type == "lorenz":
+                    v = aw.adjust_param("beta", 0.1)
+                    self._set_message(f"β = {v:.3f}")
+                elif aw.attractor_type == "rossler":
+                    v = aw.adjust_param("c", 0.5)
+                    self._set_message(f"c = {v:.1f}")
+        elif key == ord("!"):
+            if self.attractor_world:
+                aw = self.attractor_world
+                if aw.attractor_type == "lorenz":
+                    v = aw.adjust_param("sigma", -1.0)
+                    self._set_message(f"σ = {v:.1f}")
+                elif aw.attractor_type == "rossler":
+                    v = aw.adjust_param("a", -0.01)
+                    self._set_message(f"a = {v:.3f}")
+                elif aw.attractor_type == "henon":
+                    v = aw.adjust_param("a", -0.01)
+                    self._set_message(f"a = {v:.3f}")
+        elif key == ord("@"):
+            if self.attractor_world:
+                aw = self.attractor_world
+                if aw.attractor_type == "lorenz":
+                    v = aw.adjust_param("rho", -1.0)
+                    self._set_message(f"ρ = {v:.1f}")
+                elif aw.attractor_type == "rossler":
+                    v = aw.adjust_param("b", -0.01)
+                    self._set_message(f"b = {v:.3f}")
+                elif aw.attractor_type == "henon":
+                    v = aw.adjust_param("b", -0.01)
+                    self._set_message(f"b = {v:.3f}")
+        elif key == ord("#"):
+            if self.attractor_world:
+                aw = self.attractor_world
+                if aw.attractor_type == "lorenz":
+                    v = aw.adjust_param("beta", -0.1)
+                    self._set_message(f"β = {v:.3f}")
+                elif aw.attractor_type == "rossler":
+                    v = aw.adjust_param("c", -0.5)
+                    self._set_message(f"c = {v:.1f}")
+        elif key == ord("A") or key == 27:  # Shift+A or ESC to exit
+            self._stop_attractor()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_attractor(self) -> None:
+        """Enter Strange Attractor visualization mode."""
+        self.attractor_mode = True
+        self.attractor_gen = 0
+        max_h, max_w = self.stdscr.getmaxyx()
+        w = max(4, max_w // 2)
+        h = max(4, max_h - 3)
+        preset = ATTRACTOR_PRESET_NAMES[self.attractor_preset_idx]
+        self.attractor_world = AttractorWorld(w, h, preset=preset)
+        self.running = True
+        self._set_message(
+            "Strange Attractors — [P/N]Preset [C]olor [Space]Rotate [+/-]Scale [1-3/!@#]Params [Shift+A]Exit"
+        )
+
+    def _stop_attractor(self) -> None:
+        """Exit Strange Attractor mode."""
+        self.attractor_mode = False
+        self.running = False
+        self.attractor_world = None
+        self.attractor_gen = 0
+        self._set_message("Strange Attractor mode ended")
+
+    def _attractor_tick(self) -> None:
+        """Advance one attractor simulation step."""
+        if self.attractor_world:
+            self.attractor_world.tick()
+            self.attractor_gen += 1
+
+    def _draw_attractor(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the Strange Attractor visualization."""
+        if not self.attractor_world:
+            return
+        aw = self.attractor_world
+
+        draw_h = min(grid_rows, aw.height)
+        draw_w = min(grid_cols, aw.width)
+
+        for r in range(draw_h):
+            row_data = aw.density[r]
+            for c in range(draw_w):
+                sc = c * 2
+                if sc + 1 >= max_w:
+                    break
+
+                val = row_data[c]
+                ch, attr = aw.density_to_char_attr(val, self.use_color)
+
+                try:
+                    self.stdscr.addstr(r, sc, ch, attr)
+                except curses.error:
+                    pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            st = aw.stats
+            preset_name = ATTRACTOR_PRESET_NAMES[aw.preset_idx]
+            params = st["params"]
+            param_str = " ".join(f"{k}={v}" for k, v in params.items() if k != "type")
+            status = (
+                f" {st['attractor']} | {param_str} | "
+                f"Steps: {st['steps']} | Trail: {st['trail']} | "
+                f"Palette: {st['palette']} | {preset_name} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            help_text = (
+                " [P/N]Preset [C]olor [Space]Toggle rotate [+/-]Scale [Arrows]Pan | "
+                "[1/2/3]Inc param [!/@ /#]Dec param | [R]eset [Shift+A]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -11823,6 +12391,8 @@ class App:
             self._draw_maze(max_h, max_w, grid_rows, grid_cols)
         elif self.fractal_mode:
             self._draw_fractal(max_h, max_w, grid_rows, grid_cols)
+        elif self.attractor_mode:
+            self._draw_attractor(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
@@ -12653,6 +13223,8 @@ class App:
             self._stop_maze()
         elif self.fractal_mode:
             self._stop_fractal()
+        elif self.attractor_mode:
+            self._stop_attractor()
         elif self.split_mode:
             self._stop_split()
         elif self.evolve_mode:
