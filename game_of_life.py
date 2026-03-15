@@ -1910,6 +1910,158 @@ class FluidWorld:
 
 
 # ---------------------------------------------------------------------------
+# Ising Model — 2D ferromagnetic spin simulation (Metropolis-Hastings)
+# ---------------------------------------------------------------------------
+
+# Presets: (temperature, coupling_J, description)
+# Critical temperature for 2D Ising: Tc = 2J / ln(1+sqrt(2)) ≈ 2.269 for J=1
+ISING_PRESETS = {
+    "cold":       (0.5,  1.0, "Deep ferromagnetic — highly ordered"),
+    "cool":       (1.5,  1.0, "Below critical — large domains"),
+    "critical":   (2.269, 1.0, "Critical temperature — phase transition"),
+    "warm":       (3.0,  1.0, "Above critical — paramagnetic"),
+    "hot":        (5.0,  1.0, "High temperature — fully disordered"),
+    "anti-ferro": (1.5, -1.0, "Antiferromagnetic — checkerboard order"),
+}
+ISING_PRESET_NAMES = list(ISING_PRESETS.keys())
+
+# Rendering characters: spin-up and spin-down
+ISING_SPIN_UP = "▀▀"
+ISING_SPIN_DOWN = "▄▄"
+
+
+class IsingWorld:
+    """2D Ising Model simulation using Metropolis-Hastings algorithm.
+
+    Each site on a 2D square lattice holds a spin (+1 or -1).  The
+    Hamiltonian H = -J Σ s_i s_j (sum over nearest neighbours) drives
+    the dynamics via the Metropolis acceptance rule at temperature T.
+
+    At low T the system is ferromagnetic (ordered); above the critical
+    temperature Tc ≈ 2.269 J/kB it becomes paramagnetic (disordered).
+    """
+
+    def __init__(self, width: int, height: int, preset: str = "critical"):
+        self.width = width
+        self.height = height
+        self.preset_idx = ISING_PRESET_NAMES.index(preset)
+
+        # Spin lattice: +1 or -1
+        self.spin: list[list[int]] = [
+            [random.choice((-1, 1)) for _ in range(width)]
+            for _ in range(height)
+        ]
+
+        # Parameters
+        self._apply_preset(preset)
+
+        # Cached observables (updated each tick)
+        self._magnetization = 0.0
+        self._energy = 0.0
+        self._update_observables()
+
+        # Steps per tick (multiple Metropolis sweeps per rendered frame)
+        self.sweeps_per_tick = 1
+
+    def _apply_preset(self, name: str) -> None:
+        temp, J, _desc = ISING_PRESETS[name]
+        self.temperature = temp
+        self.J = J
+        # beta = 1 / (kB * T); we set kB = 1
+        self.beta = 1.0 / max(self.temperature, 1e-9)
+
+    def cycle_preset(self, direction: int = 1) -> str:
+        self.preset_idx = (self.preset_idx + direction) % len(ISING_PRESET_NAMES)
+        name = ISING_PRESET_NAMES[self.preset_idx]
+        self._apply_preset(name)
+        return name
+
+    def set_temperature(self, T: float) -> None:
+        """Set temperature directly (for real-time slider control)."""
+        self.temperature = max(0.01, T)
+        self.beta = 1.0 / self.temperature
+
+    def _neighbour_sum(self, y: int, x: int) -> int:
+        """Sum of nearest-neighbour spins (periodic boundary conditions)."""
+        w, h = self.width, self.height
+        return (
+            self.spin[(y - 1) % h][x] +
+            self.spin[(y + 1) % h][x] +
+            self.spin[y][(x - 1) % w] +
+            self.spin[y][(x + 1) % w]
+        )
+
+    def tick(self) -> None:
+        """Perform Metropolis-Hastings sweeps over the lattice."""
+        w, h = self.width, self.height
+        J = self.J
+        beta = self.beta
+        spin = self.spin
+        rand = random.random
+
+        for _ in range(self.sweeps_per_tick):
+            # One full sweep = N random single-spin flips
+            n_sites = w * h
+            for _ in range(n_sites):
+                x = random.randint(0, w - 1)
+                y = random.randint(0, h - 1)
+                s = spin[y][x]
+                nn = (
+                    spin[(y - 1) % h][x] +
+                    spin[(y + 1) % h][x] +
+                    spin[y][(x - 1) % w] +
+                    spin[y][(x + 1) % w]
+                )
+                # Energy change if we flip: ΔE = 2 * J * s * Σnn
+                dE = 2.0 * J * s * nn
+                if dE <= 0.0 or rand() < math.exp(-beta * dE):
+                    spin[y][x] = -s
+
+        self._update_observables()
+
+    def _update_observables(self) -> None:
+        """Compute magnetization and energy."""
+        w, h = self.width, self.height
+        total_spin = 0
+        total_energy = 0.0
+        for y in range(h):
+            for x in range(w):
+                s = self.spin[y][x]
+                total_spin += s
+                # Count right and down neighbours only to avoid double-counting
+                total_energy -= self.J * s * self.spin[y][(x + 1) % w]
+                total_energy -= self.J * s * self.spin[(y + 1) % h][x]
+        n = w * h
+        self._magnetization = total_spin / n
+        self._energy = total_energy / n
+
+    @property
+    def magnetization(self) -> float:
+        """Average magnetization per site: M = <s> in [-1, 1]."""
+        return self._magnetization
+
+    @property
+    def energy(self) -> float:
+        """Average energy per site."""
+        return self._energy
+
+    def reset_random(self) -> None:
+        """Reset to random spin configuration."""
+        for y in range(self.height):
+            for x in range(self.width):
+                self.spin[y][x] = random.choice((-1, 1))
+        self._update_observables()
+
+    def reset_aligned(self, direction: int = 1) -> None:
+        """Reset to fully aligned spin configuration."""
+        s = 1 if direction >= 0 else -1
+        for y in range(self.height):
+            for x in range(self.width):
+                self.spin[y][x] = s
+        self._update_observables()
+
+
+# ---------------------------------------------------------------------------
 # Pattern detector — identifies known still lifes, oscillators, spaceships
 # ---------------------------------------------------------------------------
 
@@ -2456,6 +2608,11 @@ class App:
         self.fluid_cursor_x = 0
         self.fluid_cursor_y = 0
         self.fluid_painting = False  # True while painting obstacles
+        # Ising Model (statistical mechanics) mode
+        self.ising_mode = False
+        self.ising_world: IsingWorld | None = None
+        self.ising_gen = 0
+        self.ising_preset_idx = 0
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -2499,6 +2656,9 @@ class App:
             elif self.fluid_mode:
                 if self.running:
                     self._fluid_tick()
+            elif self.ising_mode:
+                if self.running:
+                    self._ising_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -2595,6 +2755,9 @@ class App:
             curses.init_pair(56, curses.COLOR_RED, -1)     # Fluid: fast/pos vort
             curses.init_pair(57, curses.COLOR_WHITE, -1)   # Fluid: obstacle
             curses.init_pair(58, curses.COLOR_MAGENTA, -1) # Fluid: cursor
+            # Ising Model spin colors
+            curses.init_pair(59, curses.COLOR_CYAN, -1)    # Ising: spin up (+1)
+            curses.init_pair(60, curses.COLOR_RED, -1)     # Ising: spin down (-1)
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -2673,6 +2836,10 @@ class App:
         # Fluid Dynamics (LBM) mode has its own input handler
         if self.fluid_mode:
             return self._handle_fluid_input(key)
+
+        # Ising Model mode has its own input handler
+        if self.ising_mode:
+            return self._handle_ising_input(key)
 
         # Split mode has limited input
         if self.split_mode:
@@ -2877,6 +3044,10 @@ class App:
         # Fluid Dynamics (Lattice Boltzmann) mode
         elif key == ord("D"):
             self._start_fluid()
+
+        # Ising Model (statistical mechanics) mode
+        elif key == ord("I"):
+            self._start_ising()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -4790,6 +4961,176 @@ class App:
             except curses.error:
                 pass
 
+    # --- Ising Model (statistical mechanics) mode ---
+
+    def _handle_ising_input(self, key: int) -> bool:
+        """Handle input while in Ising Model mode."""
+        if key == ord("q"):
+            return False
+        elif key == ord(" "):
+            self.running = not self.running
+        elif key == ord("s"):
+            if not self.running:
+                self._ising_tick()
+        elif key == ord("r"):
+            # Reset to random spins
+            if self.ising_world:
+                self.ising_world.reset_random()
+                self.ising_gen = 0
+                self._set_message("Reset to random spins")
+        elif key == ord("a"):
+            # Reset to all aligned up
+            if self.ising_world:
+                self.ising_world.reset_aligned(1)
+                self.ising_gen = 0
+                self._set_message("Reset to all spin-up")
+        elif key == ord("z"):
+            # Reset to all aligned down
+            if self.ising_world:
+                self.ising_world.reset_aligned(-1)
+                self.ising_gen = 0
+                self._set_message("Reset to all spin-down")
+        # Temperature control: +/- fine, </> coarse
+        elif key == ord(".") or key == ord("=") or key == ord("+"):
+            if self.ising_world:
+                self.ising_world.set_temperature(self.ising_world.temperature + 0.1)
+                self._set_message(f"T = {self.ising_world.temperature:.2f}")
+        elif key == ord(",") or key == ord("-") or key == ord("_"):
+            if self.ising_world:
+                self.ising_world.set_temperature(self.ising_world.temperature - 0.1)
+                self._set_message(f"T = {self.ising_world.temperature:.2f}")
+        elif key == ord(">"):
+            if self.ising_world:
+                self.ising_world.set_temperature(self.ising_world.temperature + 0.5)
+                self._set_message(f"T = {self.ising_world.temperature:.2f}")
+        elif key == ord("<"):
+            if self.ising_world:
+                self.ising_world.set_temperature(self.ising_world.temperature - 0.5)
+                self._set_message(f"T = {self.ising_world.temperature:.2f}")
+        # Cycle preset forward/back
+        elif key == ord("p") or key == ord("n"):
+            if self.ising_world:
+                direction = 1 if key == ord("n") else -1
+                name = self.ising_world.cycle_preset(direction)
+                self.ising_preset_idx = self.ising_world.preset_idx
+                self.ising_gen = 0
+                self._set_message(f"Preset: {name} (T={self.ising_world.temperature:.3f})")
+        # Sweeps per tick
+        elif key == ord("]"):
+            if self.ising_world:
+                self.ising_world.sweeps_per_tick = min(20, self.ising_world.sweeps_per_tick + 1)
+                self._set_message(f"Sweeps/tick: {self.ising_world.sweeps_per_tick}")
+        elif key == ord("["):
+            if self.ising_world:
+                self.ising_world.sweeps_per_tick = max(1, self.ising_world.sweeps_per_tick - 1)
+                self._set_message(f"Sweeps/tick: {self.ising_world.sweeps_per_tick}")
+        # Speed control
+        elif key == ord("f"):
+            self.speed = min(20, self.speed + 1)
+            self._update_timeout()
+        elif key == ord("d"):
+            self.speed = max(1, self.speed - 1)
+            self._update_timeout()
+        # Exit Ising mode
+        elif key == ord("I") or key == 27:
+            self._stop_ising()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_ising(self) -> None:
+        """Enter Ising Model mode."""
+        self.running = False
+        self.ising_mode = True
+        self.ising_gen = 0
+        max_h, max_w = self.stdscr.getmaxyx()
+        w = max(4, max_w // 2)
+        h = max(4, max_h - 3)
+        preset = ISING_PRESET_NAMES[self.ising_preset_idx]
+        self.ising_world = IsingWorld(w, h, preset=preset)
+        self._set_message(
+            "Ising Model — [Space]Run [,/.]Temp [P/N]Preset [Shift+I]Exit"
+        )
+
+    def _stop_ising(self) -> None:
+        """Exit Ising Model mode."""
+        self.ising_mode = False
+        self.running = False
+        self.ising_world = None
+        self.ising_gen = 0
+        self._set_message("Ising Model mode ended")
+
+    def _ising_tick(self) -> None:
+        """Advance one Ising Monte Carlo sweep."""
+        if self.ising_world:
+            self.ising_world.tick()
+            self.ising_gen += 1
+
+    def _draw_ising(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the Ising spin lattice with color-coded spins."""
+        if not self.ising_world:
+            return
+        iw = self.ising_world
+
+        for r in range(min(grid_rows, iw.height)):
+            for c in range(min(grid_cols, iw.width)):
+                sc = c * 2
+                if sc + 1 >= max_w:
+                    break
+
+                s = iw.spin[r][c]
+                if s > 0:
+                    # Spin up: cyan block
+                    attr = curses.color_pair(59) | curses.A_BOLD if self.use_color else curses.A_BOLD
+                    ch = "██"
+                else:
+                    # Spin down: red block
+                    attr = curses.color_pair(60) if self.use_color else 0
+                    ch = "░░"
+
+                try:
+                    self.stdscr.addstr(r, sc, ch, attr)
+                except curses.error:
+                    pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            preset_name = ISING_PRESET_NAMES[iw.preset_idx]
+            state_str = "RUNNING" if self.running else "PAUSED"
+            mag = iw.magnetization
+            eng = iw.energy
+            Tc = 2.0 * abs(iw.J) / math.log(1.0 + math.sqrt(2.0))
+            phase = "FERRO" if iw.temperature < Tc else "PARA"
+            status = (
+                f" Ising Model | Gen: {self.ising_gen} | "
+                f"T={iw.temperature:.2f} (Tc≈{Tc:.2f}) {phase} | "
+                f"M={mag:+.3f} E={eng:.3f} | "
+                f"J={iw.J:+.1f} Sweeps:{iw.sweeps_per_tick} | "
+                f"Speed: {self.speed} | {state_str} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            help_text = (
+                " [Space]Run [S]tep [R]andom [A]ll-up [Z]all-down | "
+                "[,/.]Temp±0.1 [</>]±0.5 [P/N]Preset [[]Sweeps | "
+                "[F]aster [D]slower | [Shift+I]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -5129,6 +5470,8 @@ class App:
             self._draw_physarum(max_h, max_w, grid_rows, grid_cols)
         elif self.fluid_mode:
             self._draw_fluid(max_h, max_w, grid_rows, grid_cols)
+        elif self.ising_mode:
+            self._draw_ising(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
