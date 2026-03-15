@@ -621,6 +621,216 @@ LENIA_PRESET_NAMES = list(LENIA_PRESETS.keys())
 # Shade characters for rendering continuous values (5 levels)
 LENIA_SHADES = " ░▒▓█"
 
+# ---------------------------------------------------------------------------
+# Falling Sand simulation — material types and physics
+# ---------------------------------------------------------------------------
+
+# Material constants
+MAT_EMPTY = 0
+MAT_SAND = 1
+MAT_WATER = 2
+MAT_FIRE = 3
+MAT_STONE = 4
+MAT_PLANT = 5
+
+SAND_MATERIALS = ["Sand", "Water", "Fire", "Stone", "Plant"]
+SAND_MATERIAL_IDS = [MAT_SAND, MAT_WATER, MAT_FIRE, MAT_STONE, MAT_PLANT]
+
+# Display characters per material
+SAND_CHARS = {
+    MAT_SAND: "░░",
+    MAT_WATER: "~~",
+    MAT_FIRE: "▲▲",
+    MAT_STONE: "██",
+    MAT_PLANT: "♣♣",
+}
+
+
+class SandGrid:
+    """Falling sand simulation with multiple material types and gravity physics.
+
+    Materials: sand (falls, piles), water (flows, fills), fire (rises, ignites
+    plants), stone (static), plant (grows slowly, burns).
+    """
+
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        # 2D grid: each cell is a material constant
+        self.cells: list[list[int]] = [[MAT_EMPTY] * width for _ in range(height)]
+
+    def clear(self) -> None:
+        for r in range(self.height):
+            for c in range(self.width):
+                self.cells[r][c] = MAT_EMPTY
+
+    def get(self, r: int, c: int) -> int:
+        if 0 <= r < self.height and 0 <= c < self.width:
+            return self.cells[r][c]
+        return -1  # out of bounds
+
+    def set(self, r: int, c: int, mat: int) -> None:
+        if 0 <= r < self.height and 0 <= c < self.width:
+            self.cells[r][c] = mat
+
+    def swap(self, r1: int, c1: int, r2: int, c2: int) -> None:
+        self.cells[r1][c1], self.cells[r2][c2] = self.cells[r2][c2], self.cells[r1][c1]
+
+    def count_material(self) -> dict[int, int]:
+        counts: dict[int, int] = {}
+        for r in range(self.height):
+            for c in range(self.width):
+                m = self.cells[r][c]
+                if m != MAT_EMPTY:
+                    counts[m] = counts.get(m, 0) + 1
+        return counts
+
+    def randomize(self) -> None:
+        self.clear()
+        for r in range(self.height):
+            for c in range(self.width):
+                if random.random() < 0.15:
+                    self.cells[r][c] = random.choice(SAND_MATERIAL_IDS)
+
+    def tick(self) -> None:
+        """Advance one physics step. Process bottom-up for gravity."""
+        w, h = self.width, self.height
+        # Track which cells have been updated this tick to avoid double-moves
+        updated = [[False] * w for _ in range(h)]
+
+        # Process bottom-to-top so falling particles don't cascade in one tick
+        for r in range(h - 2, -1, -1):
+            # Randomize column order to avoid left-bias for water/fire spreading
+            cols = list(range(w))
+            random.shuffle(cols)
+            for c in cols:
+                if updated[r][c]:
+                    continue
+                mat = self.cells[r][c]
+                if mat == MAT_EMPTY or mat == MAT_STONE:
+                    continue
+
+                if mat == MAT_SAND:
+                    self._tick_sand(r, c, updated)
+                elif mat == MAT_WATER:
+                    self._tick_water(r, c, updated)
+                elif mat == MAT_FIRE:
+                    self._tick_fire(r, c, updated)
+                elif mat == MAT_PLANT:
+                    self._tick_plant(r, c, updated)
+
+        # Fire on the bottom row fizzles out
+        for c in range(w):
+            if self.cells[h - 1][c] == MAT_FIRE:
+                if random.random() < 0.3:
+                    self.cells[h - 1][c] = MAT_EMPTY
+
+    def _tick_sand(self, r: int, c: int, updated: list[list[bool]]) -> None:
+        """Sand: falls down; if blocked, slides diagonally; displaces water."""
+        below = self.get(r + 1, c)
+        if below == MAT_EMPTY:
+            self.swap(r, c, r + 1, c)
+            updated[r + 1][c] = True
+        elif below == MAT_WATER:
+            # Sand sinks through water
+            self.swap(r, c, r + 1, c)
+            updated[r + 1][c] = True
+        else:
+            # Try diagonal
+            dirs = [(-1, 1), (1, 1)]  # (dc, dr_offset=+1)
+            random.shuffle(dirs)
+            for dc, _ in dirs:
+                nc = c + dc
+                diag = self.get(r + 1, nc)
+                if diag == MAT_EMPTY:
+                    self.swap(r, c, r + 1, nc)
+                    updated[r + 1][nc] = True
+                    return
+                elif diag == MAT_WATER:
+                    self.swap(r, c, r + 1, nc)
+                    updated[r + 1][nc] = True
+                    return
+
+    def _tick_water(self, r: int, c: int, updated: list[list[bool]]) -> None:
+        """Water: falls down, then spreads horizontally."""
+        below = self.get(r + 1, c)
+        if below == MAT_EMPTY:
+            self.swap(r, c, r + 1, c)
+            updated[r + 1][c] = True
+        else:
+            # Try diagonal down
+            dirs = [(-1, 1), (1, 1)]
+            random.shuffle(dirs)
+            moved = False
+            for dc, _ in dirs:
+                nc = c + dc
+                diag = self.get(r + 1, nc)
+                if diag == MAT_EMPTY:
+                    self.swap(r, c, r + 1, nc)
+                    updated[r + 1][nc] = True
+                    moved = True
+                    break
+            if not moved:
+                # Spread horizontally
+                dirs2 = [-1, 1]
+                random.shuffle(dirs2)
+                for dc in dirs2:
+                    nc = c + dc
+                    side = self.get(r, nc)
+                    if side == MAT_EMPTY and not updated[r][nc]:
+                        self.swap(r, c, r, nc)
+                        updated[r][nc] = True
+                        break
+
+    def _tick_fire(self, r: int, c: int, updated: list[list[bool]]) -> None:
+        """Fire: rises upward, spreads to adjacent plants, fizzles randomly."""
+        # Fire has a chance to die out
+        if random.random() < 0.08:
+            self.cells[r][c] = MAT_EMPTY
+            return
+
+        # Ignite adjacent plants
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = r + dr, c + dc
+                if self.get(nr, nc) == MAT_PLANT:
+                    if random.random() < 0.4:
+                        self.cells[nr][nc] = MAT_FIRE
+                        updated[nr][nc] = True
+
+        # Rise upward
+        above = self.get(r - 1, c)
+        if above == MAT_EMPTY:
+            self.swap(r, c, r - 1, c)
+            updated[r - 1][c] = True
+        else:
+            # Try diagonal up
+            dirs = [-1, 1]
+            random.shuffle(dirs)
+            for dc in dirs:
+                nc = c + dc
+                if self.get(r - 1, nc) == MAT_EMPTY:
+                    self.swap(r, c, r - 1, nc)
+                    updated[r - 1][nc] = True
+                    return
+            # Fire trapped: more likely to die
+            if random.random() < 0.2:
+                self.cells[r][c] = MAT_EMPTY
+
+    def _tick_plant(self, r: int, c: int, updated: list[list[bool]]) -> None:
+        """Plant: slowly grows into adjacent empty cells."""
+        if random.random() < 0.005:
+            dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+            random.shuffle(dirs)
+            for dr, dc in dirs:
+                nr, nc = r + dr, c + dc
+                if self.get(nr, nc) == MAT_EMPTY and not updated[nr][nc]:
+                    self.cells[nr][nc] = MAT_PLANT
+                    updated[nr][nc] = True
+                    return
+
 
 class LeniaGrid:
     """Continuous-state cellular automaton grid (Lenia).
@@ -1259,6 +1469,12 @@ class App:
         self.wolfram_rows: list[list[bool]] = []  # computed rows of cells
         self.wolfram_generation = 0
         self.wolfram_notable = [30, 54, 60, 90, 110, 150, 182, 184, 250]
+        # Falling sand simulation mode
+        self.sand_mode = False
+        self.sand_grid: SandGrid | None = None
+        self.sand_gen = 0
+        self.sand_material_idx = 0  # index into SAND_MATERIALS
+        self.sand_brush_size = 2    # brush radius for placing material
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -1284,6 +1500,9 @@ class App:
             elif self.multistate_mode:
                 if self.running:
                     self._multistate_tick()
+            elif self.sand_mode:
+                if self.running:
+                    self._sand_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -1344,6 +1563,12 @@ class App:
             curses.init_pair(26, curses.COLOR_GREEN, -1)   # Lenia: mid
             curses.init_pair(27, curses.COLOR_YELLOW, -1)  # Lenia: mid-high
             curses.init_pair(28, curses.COLOR_WHITE, -1)   # Lenia: high/bright
+            # Falling sand material colors
+            curses.init_pair(29, curses.COLOR_YELLOW, -1)  # Sand
+            curses.init_pair(30, curses.COLOR_BLUE, -1)    # Water
+            curses.init_pair(31, curses.COLOR_RED, -1)     # Fire
+            curses.init_pair(32, curses.COLOR_WHITE, -1)   # Stone
+            curses.init_pair(33, curses.COLOR_GREEN, -1)   # Plant
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -1398,6 +1623,10 @@ class App:
         # Multi-state automaton mode has its own input handler
         if self.multistate_mode:
             return self._handle_multistate_input(key)
+
+        # Falling sand mode has its own input handler
+        if self.sand_mode:
+            return self._handle_sand_input(key)
 
         # Split mode has limited input
         if self.split_mode:
@@ -1578,6 +1807,10 @@ class App:
         # Multi-state automaton mode (Brian's Brain / Wireworld)
         elif key == ord("X"):
             self._start_multistate()
+
+        # Falling sand simulation mode
+        elif key == ord("F"):
+            self._start_sand()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -2307,6 +2540,205 @@ class App:
         elif atype == "Langton's Ant":
             self.multistate_grid.randomize_langtons_ant()
 
+    # --- falling sand simulation mode ---
+
+    def _handle_sand_input(self, key: int) -> bool:
+        """Handle input while in falling sand mode."""
+        # Movement
+        if key in (curses.KEY_UP, ord("k")):
+            self.cursor_r = max(0, self.cursor_r - 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            self.cursor_r = min(self.grid.height - 1, self.cursor_r + 1)
+        elif key in (curses.KEY_LEFT, ord("h")):
+            self.cursor_c = max(0, self.cursor_c - 1)
+        elif key in (curses.KEY_RIGHT, ord("l")):
+            self.cursor_c = min(self.grid.width - 1, self.cursor_c + 1)
+        # Run / pause
+        elif key == ord(" "):
+            self.running = not self.running
+        # Step
+        elif key == ord("s"):
+            if not self.running:
+                self._sand_tick()
+        # Place material at cursor
+        elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
+            if self.sand_grid:
+                mat = SAND_MATERIAL_IDS[self.sand_material_idx]
+                self._sand_place(self.cursor_r, self.cursor_c, mat)
+        # Erase at cursor
+        elif key == ord("d"):
+            if self.sand_grid:
+                self._sand_place(self.cursor_r, self.cursor_c, MAT_EMPTY)
+        # Cycle material with F/G
+        elif key == ord("f"):
+            self.sand_material_idx = (self.sand_material_idx + 1) % len(SAND_MATERIALS)
+            self._set_message(f"Material: {SAND_MATERIALS[self.sand_material_idx]}")
+        elif key == ord("g"):
+            self.sand_material_idx = (self.sand_material_idx - 1) % len(SAND_MATERIALS)
+            self._set_message(f"Material: {SAND_MATERIALS[self.sand_material_idx]}")
+        # Brush size
+        elif key == ord("z"):
+            self.sand_brush_size = max(1, self.sand_brush_size - 1)
+            self._set_message(f"Brush size: {self.sand_brush_size}")
+        elif key == ord("Z"):
+            self.sand_brush_size = min(5, self.sand_brush_size + 1)
+            self._set_message(f"Brush size: {self.sand_brush_size}")
+        # Randomize
+        elif key == ord("r"):
+            if self.sand_grid:
+                self.sand_grid.randomize()
+                self.sand_gen = 0
+                self._set_message("Randomized")
+        # Clear
+        elif key == ord("c"):
+            if self.sand_grid:
+                self.sand_grid.clear()
+                self.sand_gen = 0
+                self._set_message("Cleared")
+        # Speed control
+        elif key in (ord("+"), ord("="), ord("]")):
+            self.speed = min(20, self.speed + 1)
+            self._update_timeout()
+        elif key in (ord("-"), ord("_"), ord("[")):
+            self.speed = max(1, self.speed - 1)
+            self._update_timeout()
+        # Quit
+        elif key == ord("q"):
+            return False
+        # Exit sand mode
+        elif key == ord("F") or key == 27:
+            self._stop_sand()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_sand(self) -> None:
+        """Enter falling sand simulation mode."""
+        self.sand_mode = True
+        self.running = False
+        self.sand_gen = 0
+        self.sand_material_idx = 0
+        self.sand_grid = SandGrid(self.grid.width, self.grid.height)
+        self._set_message(
+            "Falling Sand — [Enter]Place [F/G]Material [Space]Run [S]tep [R]and [F]Exit"
+        )
+
+    def _stop_sand(self) -> None:
+        """Exit falling sand simulation mode."""
+        self.sand_mode = False
+        self.running = False
+        self.sand_grid = None
+        self.sand_gen = 0
+        self._set_message("Sand mode ended")
+
+    def _sand_tick(self) -> None:
+        """Advance one physics step of the sand simulation."""
+        if self.sand_grid:
+            self.sand_grid.tick()
+            self.sand_gen += 1
+
+    def _sand_place(self, r: int, c: int, mat: int) -> None:
+        """Place material at position using brush size."""
+        if not self.sand_grid:
+            return
+        radius = self.sand_brush_size - 1
+        for dr in range(-radius, radius + 1):
+            for dc in range(-radius, radius + 1):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < self.sand_grid.height and 0 <= nc < self.sand_grid.width:
+                    self.sand_grid.set(nr, nc, mat)
+
+    def _draw_sand(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the falling sand simulation grid."""
+        if not self.sand_grid:
+            return
+        sg = self.sand_grid
+
+        # Material color pair mapping
+        mat_color = {
+            MAT_SAND: 29,
+            MAT_WATER: 30,
+            MAT_FIRE: 31,
+            MAT_STONE: 32,
+            MAT_PLANT: 33,
+        }
+
+        for screen_r in range(min(grid_rows, sg.height)):
+            r = screen_r + self.view_r
+            if r >= sg.height:
+                break
+            for screen_c in range(min(grid_cols, sg.width)):
+                c = screen_c + self.view_c
+                if c >= sg.width:
+                    break
+                x = screen_c * 2
+                if x + 1 >= max_w:
+                    break
+
+                mat = sg.cells[r][c]
+                is_cursor = (r == self.cursor_r and c == self.cursor_c)
+
+                if is_cursor:
+                    attr = curses.A_REVERSE
+                    if self.use_color:
+                        # Show selected material color at cursor
+                        sel_mat = SAND_MATERIAL_IDS[self.sand_material_idx]
+                        attr |= curses.color_pair(mat_color.get(sel_mat, 29))
+                    ch = SAND_CHARS.get(mat, "▒▒") if mat != MAT_EMPTY else "▒▒"
+                elif mat != MAT_EMPTY:
+                    ch = SAND_CHARS.get(mat, "██")
+                    pair = mat_color.get(mat, 0)
+                    attr = curses.color_pair(pair) if self.use_color else 0
+                    if mat == MAT_FIRE:
+                        attr |= curses.A_BOLD
+                else:
+                    ch, attr = "  ", 0
+
+                try:
+                    self.stdscr.addstr(screen_r, x, ch, attr)
+                except curses.error:
+                    pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            state_str = "RUNNING" if self.running else "PAUSED"
+            counts = sg.count_material()
+            total = sum(counts.values())
+            parts = []
+            for mid, name in zip(SAND_MATERIAL_IDS, SAND_MATERIALS):
+                cnt = counts.get(mid, 0)
+                if cnt > 0:
+                    parts.append(f"{name}:{cnt}")
+            breakdown = " ".join(parts) if parts else "empty"
+            sel_name = SAND_MATERIALS[self.sand_material_idx]
+            status = (
+                f" Falling Sand | Gen: {self.sand_gen} | Particles: {total} ({breakdown}) | "
+                f"Brush: {sel_name} sz={self.sand_brush_size} | Speed: {self.speed} | {state_str} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            legend = "Sand=░░ Water=~~ Fire=▲▲ Stone=██ Plant=♣♣"
+            help_text = (
+                f" [Space]Run [S]tep [Enter]Place [D]elete [F/G]Mat:{SAND_MATERIALS[self.sand_material_idx]} | "
+                f"[z/Z]BrushSz [R]and [C]lear | {legend} | "
+                f"[+/-]Spd [F]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -2634,6 +3066,8 @@ class App:
             self._draw_wolfram(max_h, max_w, grid_rows, grid_cols)
         elif self.multistate_mode:
             self._draw_multistate(max_h, max_w, grid_rows, grid_cols)
+        elif self.sand_mode:
+            self._draw_sand(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
