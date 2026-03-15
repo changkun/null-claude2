@@ -21,16 +21,20 @@ stable structures (blocks, beehives), oscillators (blinkers, pulsars),
 spaceships (gliders, LWSS), and guns that manufacture gliders indefinitely.
 
 **Formulation.**
-Let `S(t) ⊂ Z²` be the set of live cells at generation `t`. Define the Moore
-neighborhood `N(r, c) = {(r+i, c+j) : i, j ∈ {-1, 0, 1}} \ {(r, c)}`. Let
-`n(r, c, t) = |N(r, c) ∩ S(t)|` be the live neighbor count. The standard
-Life rule (B3/S23) is:
+Let `S(t) ⊂ Z²` be the set of live cells at generation `t`, where `Z²`
+denotes the integer lattice (the grid). Define the Moore neighborhood of cell
+`(r, c)` as `N(r, c) = {(r+i, c+j) : i, j ∈ {-1, 0, 1}} \ {(r, c)}` — the
+8 surrounding cells. Let `n(r, c, t) = |N(r, c) ∩ S(t)|` be the number of
+live neighbors at generation `t`. The standard Life rule (B3/S23) is:
 
 ```
 S(t+1) = { (r,c) : n(r,c,t) ∈ B  if (r,c) ∉ S(t) }     (birth)
         ∪ { (r,c) : n(r,c,t) ∈ S  if (r,c) ∈ S(t) }     (survival)
 
-where B = {3}, S = {2, 3}
+where:
+  B = {3}      — birth set: required neighbor count for a dead cell to be born
+  S = {2, 3}   — survival set: required neighbor count for a live cell to survive
+  H, W         — grid height and width
 ```
 
 The sandbox supports arbitrary birth/survival rulesets. With toroidal boundary
@@ -77,6 +81,11 @@ neighborhood pattern `(s_{i-1}, s_i, s_{i+1})`, compute the pattern index:
 ```
 k = s_{i-1} · 4 + s_i · 2 + s_{i+1}     (k ∈ {0, ..., 7})
 s_i(t+1) = bit k of R                     (i.e., (R >> k) & 1)
+
+where:
+  s_i(t)    — state of cell i at generation t (0 or 1)
+  R         — Wolfram rule number (0-255), encodes the 8-bit lookup table
+  k         — index into the lookup table, computed from the 3-cell neighborhood
 ```
 
 Successive generations are rendered top to bottom. The initial row is either a
@@ -112,24 +121,45 @@ with radius `R` using a Gaussian bell:
 ```
 K(r) = exp(-(r - μ_K)² / (2σ_K²))     for 0 < r ≤ 1, where r = dist/R
 K is normalized: K ← K / Σ K
+
+where:
+  A(x, t) ∈ [0, 1]  — continuous cell state ("aliveness") at position x, time t
+  R                  — kernel radius in cells
+  r                  — normalized distance from center (dist/R)
+  μ_K, σ_K           — kernel bell curve center and width (shape the ring)
+  K(r)               — kernel weight at normalized distance r
 ```
 
 The potential field is the weighted neighborhood sum:
 
 ```
 U(x, t) = Σ_{y ∈ N_R(x)} K(|x - y| / R) · A(y, t)
+
+where:
+  U(x, t)   — potential (weighted neighborhood activity) at cell x
+  N_R(x)    — set of cells within radius R of x
 ```
 
 The growth function maps potential to a state change rate:
 
 ```
 G(u) = 2 · exp(-(u - μ_G)² / (2σ_G²)) - 1     (range: [-1, 1])
+
+where:
+  μ_G, σ_G  — growth function center and width (define the "ideal" potential)
+  G > 0     — cell grows (state increases)
+  G < 0     — cell decays (state decreases)
 ```
 
 The state update with timestep `dt = 1/T`:
 
 ```
 A(x, t+1) = clamp(A(x, t) + dt · G(U(x, t)),  0, 1)
+
+where:
+  T          — integration period (higher T = smaller steps = smoother dynamics)
+  dt = 1/T   — timestep per generation
+  clamp      — restrict result to [0, 1]
 ```
 
 **Preset parameters:**
@@ -238,14 +268,27 @@ For each channel `c`, compute `(I * s_c, S_x * s_c, S_y * s_c)` to form a
 perception vector `p ∈ R^{3C}`. The MLP update:
 
 ```
-h = σ(W₁ · p + b₁)           (hidden layer, σ ∈ {sigmoid, tanh, relu})
+h = σ(W₁ · p + b₁)           (hidden layer)
 δ = tanh(W₂ · h + b₂)        (output layer)
 s(x) ← clamp(s(x) + 0.1 · δ + ξ,  -1, 1)
+
+where:
+  s(x) ∈ R^C     — C-channel state vector at cell x (default C = 4)
+  S_x, S_y       — Sobel edge-detection kernels (horizontal and vertical gradients)
+  I              — identity kernel (passes through the cell's own state)
+  p ∈ R^{3C}     — perception vector (3 filter responses × C channels)
+  W₁, b₁         — hidden layer weights and biases (size: 3C × hidden_size)
+  W₂, b₂         — output layer weights and biases (size: hidden_size × C)
+  σ              — activation function (sigmoid, tanh, or relu, per preset)
+  δ ∈ R^C        — proposed state change vector
+  ξ              — uniform noise ~ U(-noise/2, noise/2) for stochastic variation
+  0.1            — learning rate (scales the state update magnitude)
 ```
 
-where `ξ ~ U(-noise/2, noise/2)`. Alive masking: if `s_0(x) < 0.1` and no
-neighbor has `s_0 ≥ 0.1`, set `s(x) ← 0`. Stochastic update: each cell skips
-its update with probability `1 - update_rate`.
+Alive masking: if channel 0 of state `s_0(x) < 0.1` and no neighbor has
+`s_0 ≥ 0.1`, set `s(x) ← 0` (dead cells with no alive neighbors stay dead).
+Stochastic update: each cell skips its update with probability
+`1 - update_rate`.
 
 **Preset parameters:**
 
@@ -281,6 +324,11 @@ threshold `θ` (default `θ = 4`). A cell topples when `z(r,c) ≥ θ`:
 z(r, c) ← z(r, c) - θ · ⌊z(r, c) / θ⌋
 z(r±1, c) ← z(r±1, c) + ⌊z(r, c) / θ⌋
 z(r, c±1) ← z(r, c±1) + ⌊z(r, c) / θ⌋
+
+where:
+  z(r, c) ∈ Z≥0   — number of sand grains at cell (r, c)
+  θ                — toppling threshold (default 4; grains redistribute when z ≥ θ)
+  ⌊z/θ⌋           — number of excess units to distribute to each of 4 neighbors
 ```
 
 Grains that would leave the grid boundary are lost (open boundary). Toppling
@@ -353,17 +401,30 @@ governing PDEs:
 ```
 ∂u/∂t = D_u ∇²u - uv² + f(1 - u)
 ∂v/∂t = D_v ∇²v + uv² - (f + k)v
+
+where:
+  u(x, t), v(x, t) ∈ [0,1] — concentrations of chemical species U and V
+  D_u = 0.21     — diffusion rate of U (how fast U spreads spatially)
+  D_v = 0.105    — diffusion rate of V (V diffuses more slowly than U)
+  f              — feed rate (replenishes U from a reservoir, removes V)
+  k              — kill rate (rate at which V decays to inert product)
+  ∇²             — Laplacian operator (measures local concentration curvature)
+  -uv²           — reaction term: U is consumed when it meets two V molecules
+  +uv²           — reaction term: V is produced autocatalytically
 ```
 
-where `D_u = 0.21`, `D_v = 0.105` are diffusion coefficients, `f` is the feed
-rate, and `k` is the kill rate. The discrete update (4 substeps per tick,
-`δt = 0.25`) uses the 5-point Laplacian stencil:
+The discrete update (4 substeps per tick, `δt = 0.25`) uses the 5-point
+Laplacian stencil:
 
 ```
 ∇²u ≈ u(r-1,c) + u(r+1,c) + u(r,c-1) + u(r,c+1) - 4u(r,c)
 
 u ← clamp(u + δt · (D_u · ∇²u - uv² + f(1-u)),  0, 1)
 v ← clamp(v + δt · (D_v · ∇²v + uv² - (f+k)v),  0, 1)
+
+where:
+  δt = 0.25  — substep size (4 substeps per visible tick for numerical stability)
+  clamp      — restrict result to [0, 1]
 ```
 
 **Preset parameters (f, k):**
@@ -412,12 +473,23 @@ Each cell stores 9 distribution functions `f_i(x, t)`. Macroscopic quantities:
 ```
 ρ = Σ_i f_i                    (density)
 ρu = Σ_i e_i f_i               (momentum)
+
+where:
+  f_i(x, t)  — probability of finding a particle at cell x with velocity e_i
+  ρ           — macroscopic fluid density at cell x
+  u = (u_x, u_y) — macroscopic fluid velocity at cell x
+  e_i         — discrete velocity vector for direction i
+  w_i         — lattice weight for direction i
 ```
 
-The equilibrium distribution (Maxwell-Boltzmann):
+The equilibrium distribution (Maxwell-Boltzmann discretized to the lattice):
 
 ```
 f_i^eq = w_i ρ (1 + 3(e_i · u) + 9/2 (e_i · u)² - 3/2 |u|²)
+
+where:
+  f_i^eq  — equilibrium distribution (what f_i relaxes toward)
+  e_i · u — dot product of lattice velocity with fluid velocity
 ```
 
 BGK collision and streaming:
@@ -425,11 +497,14 @@ BGK collision and streaming:
 ```
 f_i(x + e_i, t+1) = f_i(x, t) + ω(f_i^eq - f_i)
 
-where ω = 1/τ,  τ = 3ν + 0.5  (ν = kinematic viscosity)
+where:
+  ω = 1/τ      — relaxation frequency (controls how fast f_i → f_i^eq)
+  τ = 3ν + 0.5 — relaxation time
+  ν             — kinematic viscosity of the fluid
 ```
 
-Boundary conditions: bounce-back on obstacles (`f_{opp(i)} ← f_i`), Zou-He
-inlet with prescribed velocity, zero-gradient outlet.
+Boundary conditions: bounce-back on obstacles (`f_{opp(i)} ← f_i`, reflecting
+particles back), Zou-He inlet with prescribed velocity, zero-gradient outlet.
 
 **Preset parameters:**
 
@@ -462,30 +537,47 @@ A square lattice of spins `s_i ∈ {+1, -1}` with Hamiltonian:
 
 ```
 H = -J Σ_{<i,j>} s_i s_j
+
+where:
+  H           — Hamiltonian (total energy of the spin configuration)
+  s_i ∈ {+1, -1} — spin at lattice site i
+  J           — coupling constant (J > 0: ferromagnetic, J < 0: antiferromagnetic)
+  <i,j>       — sum over all nearest-neighbor pairs (each pair counted once)
 ```
 
-where `<i,j>` denotes nearest-neighbor pairs and `J` is the coupling constant.
 The Metropolis-Hastings algorithm proposes single spin flips. For a flip at
 site `i`, the energy change is:
 
 ```
-ΔE = 2J s_i Σ_{j ∈ N(i)} s_j     (N = 4 nearest neighbors, periodic BC)
+ΔE = 2J s_i Σ_{j ∈ N(i)} s_j
+
+where:
+  ΔE     — energy change if spin s_i is flipped
+  N(i)   — the 4 nearest neighbors of site i (periodic boundary conditions)
 ```
 
 The flip is accepted with probability:
 
 ```
-P(accept) = min(1, exp(-ΔE / k_B T))     (k_B = 1 in simulation units)
+P(accept) = min(1, exp(-ΔE / k_B T))
+
+where:
+  k_B = 1   — Boltzmann constant (set to 1 in simulation units)
+  T          — temperature (controls thermal fluctuations; higher T = more random)
 ```
 
 Observables:
 
 ```
-Magnetization:  M = (1/N) Σ_i s_i
-Energy density: E = -(J/N) Σ_{<i,j>} s_i s_j
+Magnetization:  M = (1/N) Σ_i s_i          (average spin; M ≈ ±1 when ordered)
+Energy density: E = -(J/N) Σ_{<i,j>} s_i s_j   (average energy per site)
+
+where:
+  N — total number of lattice sites
 ```
 
-Critical temperature: `T_c = 2J / ln(1 + √2) ≈ 2.269 J/k_B`.
+Critical temperature: `T_c = 2J / ln(1 + √2) ≈ 2.269 J/k_B` — the exact
+Onsager solution for the 2D square lattice phase transition.
 
 **Preset parameters:**
 
@@ -521,6 +613,14 @@ The Lorentz force on a particle with charge `q`, velocity `v`, in fields
 
 ```
 F = q(v × B + E)
+
+where:
+  F        — force on the particle (Lorentz force)
+  q        — particle charge (+1 or -1)
+  v        — particle velocity vector
+  B        — magnetic field vector (B_x, B_y, B_z)
+  E        — electric field vector (E_x, E_y)
+  v × B    — cross product (deflects particle perpendicular to both v and B)
 ```
 
 The Boris integrator (with `δt = 0.15`) splits the update into three phases:
@@ -536,6 +636,14 @@ The Boris integrator (with `δt = 0.15`) splits the update into three phases:
 3. Half E-field kick:     v^{n+1} = v⁺ + (qδt/2) E
 
 Position update:          x^{n+1} = x^n + v^{n+1} · δt
+
+where:
+  v^n, v^{n+1}  — velocity at timestep n and n+1
+  x^n, x^{n+1}  — position at timestep n and n+1
+  δt = 0.15      — integration timestep
+  v⁻, v⁺         — intermediate velocities (before/after B-field rotation)
+  t              — rotation half-angle vector (from B-field)
+  s              — rotation scaling vector (ensures exact circular orbit geometry)
 ```
 
 Speed cap: `|v| ≤ 4.0`. Reflective boundary conditions.
@@ -545,6 +653,10 @@ In magnetic bottle mode, the field strengthens at the boundaries:
 ```
 B_z ← B_z · (1 + 3(2y/H - 1)⁴)
 B_x ← B_x + 0.3 · (2x/W - 1) · (2y/H - 1)²
+
+where:
+  H, W  — grid height and width
+  y, x  — particle position (normalized to [0, H] and [0, W])
 ```
 
 **Presets**: cyclotron, magnetic-bottle, exb-drift, hall-effect, aurora.
@@ -571,8 +683,17 @@ typically chaotic.
 Pairwise gravitational force with softening:
 
 ```
-F_ij = G m_i m_j / (|r_ij|² + ε²)     (ε = 1.5, softening)
+F_ij = G m_i m_j / (|r_ij|² + ε²)
 a_i = Σ_{j≠i} G m_j (r_j - r_i) / (|r_ij|² + ε²)^{3/2}
+
+where:
+  F_ij      — gravitational force magnitude between bodies i and j
+  G = 0.5   — gravitational constant (simulation units)
+  m_i, m_j  — masses of the two bodies
+  r_ij      — displacement vector from body i to body j
+  |r_ij|    — distance between bodies i and j
+  ε = 1.5   — softening length (prevents force singularity at r → 0)
+  a_i       — acceleration of body i (sum of gravitational pulls from all others)
 ```
 
 Velocity-Verlet integration (`δt = 0.08`):
@@ -580,15 +701,23 @@ Velocity-Verlet integration (`δt = 0.08`):
 ```
 v_i ← v_i + a_i · δt
 x_i ← x_i + v_i · δt
+
+where:
+  v_i   — velocity of body i
+  x_i   — position of body i
+  δt    — integration timestep
 ```
 
-Speed cap: `|v| ≤ 5.0`. Collision merging when `|r_ij| < (R_i + R_j) · d_merge`
-(with `d_merge = 1.0`, `R = max(0.3, m^{1/3} · 0.3)`):
+Speed cap: `|v| ≤ 5.0`. Collision merging when `|r_ij| < (R_i + R_j) · d_merge`:
 
 ```
 m_new = m_i + m_j
 v_new = (m_i v_i + m_j v_j) / m_new     (momentum conservation)
 x_new = (m_i x_i + m_j x_j) / m_new     (center of mass)
+
+where:
+  d_merge = 1.0             — merge distance multiplier
+  R_i = max(0.3, m_i^{1/3} · 0.3)  — visual radius of body i (scales with mass)
 ```
 
 Body classification: mass ≥ 30 → star, mass ≥ 8 → planet, else asteroid.
@@ -625,7 +754,6 @@ concentration `S(r,c)`, velocity `V(r,c)`, cumulative erosion. Each tick:
 3. Velocity:     V_new = min(√(V² + Δh · g), 3.0)
 
 4. Capacity:     C = max(Δh, Δh_min) · V_new · κ · flow
-                 (κ = sediment_capacity coefficient)
 
 5. Erosion/Deposition:
    if S < C:     erode = min((C - S) · α_e,  T/2)
@@ -636,6 +764,23 @@ concentration `S(r,c)`, velocity `V(r,c)`, cumulative erosion. Each tick:
 6. Transport:    Move water and proportional sediment to n*.
 
 7. Evaporation:  W ← W · (1 - evap_rate)
+
+where:
+  T(r,c)    — terrain height at cell (r,c)
+  W(r,c)    — water depth at cell (r,c)
+  S(r,c)    — sediment concentration suspended in water
+  V(r,c)    — water flow velocity
+  n*        — lowest neighboring cell (steepest descent direction)
+  Δh        — height difference to lowest neighbor (drives flow)
+  flow      — amount of water transferred to neighbor
+  g         — gravity (controls how much Δh accelerates water)
+  C         — sediment carrying capacity (how much sediment the water can hold)
+  κ         — sediment capacity coefficient (preset-dependent)
+  Δh_min    — minimum slope for capacity calculation (prevents zero capacity on flats)
+  α_e       — erosion rate (fraction of capacity deficit eroded per tick)
+  α_d       — deposition rate (fraction of excess sediment deposited per tick)
+  ξ         — uniform random noise in [0, 1]
+  evap_rate — evaporation rate (fraction of water lost per tick)
 ```
 
 **Presets**: gentle-hills, mountain-range, canyon-carver, river-delta,
@@ -699,8 +844,8 @@ initial angle differences to visualize divergence.
 
 **Formulation.**
 Two rigid rods of lengths `L₁, L₂` and bob masses `m₁, m₂` under gravity
-`g = 9.81`. Let `θ₁, θ₂` be the angles from vertical, `ω₁, ω₂` the angular
-velocities, and `δ = θ₁ - θ₂`. The equations of motion from the Lagrangian:
+`g = 9.81 m/s²`. The state is `(θ₁, θ₂, ω₁, ω₂)`. The equations of motion
+derived from the Lagrangian:
 
 ```
 α₁ = [-g(2m₁+m₂)sin θ₁ - m₂g sin(θ₁-2θ₂)
@@ -709,10 +854,20 @@ velocities, and `δ = θ₁ - θ₂`. The equations of motion from the Lagrangia
 
 α₂ = [2 sin δ · (ω₁²L₁(m₁+m₂) + g(m₁+m₂)cos θ₁ + ω₂²L₂m₂ cos δ)]
       / [L₂(2m₁ + m₂ - m₂ cos 2δ)]
+
+where:
+  θ₁, θ₂     — angles of the upper and lower rods from vertical (radians)
+  ω₁, ω₂     — angular velocities (dθ₁/dt, dθ₂/dt)
+  α₁, α₂     — angular accelerations (dω₁/dt, dω₂/dt)
+  δ = θ₁ - θ₂ — angle difference between the two rods
+  L₁, L₂     — rod lengths (meters)
+  m₁, m₂     — bob masses (kg)
+  g = 9.81    — gravitational acceleration (m/s²)
+  γ           — damping coefficient (optional; α₁ -= γω₁, α₂ -= γω₂)
 ```
 
-With optional damping: `α₁ -= γω₁`, `α₂ -= γω₂`. Integration uses 4th-order
-Runge-Kutta with `δt = 0.002`. Bob positions:
+Integration uses 4th-order Runge-Kutta with `δt = 0.002 s`. Bob positions in
+Cartesian coordinates:
 
 ```
 x₁ = L₁ sin θ₁           y₁ = L₁ cos θ₁
@@ -720,8 +875,9 @@ x₂ = x₁ + L₂ sin θ₂     y₂ = y₁ + L₂ cos θ₂
 ```
 
 Pendulum B starts with `θ₁_B = θ₁_A + Δ`, `θ₂_B = θ₂_A + Δ` where
-`Δ = 0.001 rad`. Divergence `|Δθ₁| + |Δθ₂|` grows exponentially, confirming
-positive Lyapunov exponent.
+`Δ = 0.001 rad` — an infinitesimal perturbation. The divergence
+`|Δθ₁| + |Δθ₂|` grows exponentially, confirming a positive Lyapunov exponent
+(characteristic of deterministic chaos).
 
 **Presets**: classic, heavy-light, long-short, high-energy, damped, symmetric.
 
@@ -752,18 +908,36 @@ attraction/repulsion between types. The piecewise-linear force between
 particles `i, j` at distance `r`:
 
 ```
-         ⎧ r/(β·r_max) - 1              if r < β·r_max   (repulsion)
-F(r,a) = ⎨ a · 2t          if t < 0.5
-         ⎩ a · 2(1 - t)    if t ≥ 0.5   where t = (r - β·r_max)/(r_max - β·r_max)
-         0                               if r ≥ r_max
+         ⎧ r/(β·r_max) - 1              if r < β·r_max   (universal repulsion zone)
+F(r,a) = ⎨ a · 2t          if t < 0.5   (rising attraction/repulsion)
+         ⎩ a · 2(1 - t)    if t ≥ 0.5   (falling attraction/repulsion)
+         0                               if r ≥ r_max     (no interaction)
+
+where:
+  r           — distance between two particles
+  a ∈ [-1, 1] — interaction strength from matrix A[k_i][k_j] (+ attracts, - repels)
+  t = (r - β·r_max) / (r_max - β·r_max) — normalized position in interaction zone
+  r_max = 80  — maximum interaction radius (beyond this, particles don't interact)
+  β = 0.3     — repulsion fraction (inner 30% of r_max is always repulsive)
+  F(r,a)      — force magnitude (positive = repulsion, negative = attraction)
 ```
 
-Parameters: `r_max = 80`, `β = 0.3`, `force_scale = 5.0`, `friction = 0.05`,
-`δt = 0.02`. The velocity update (with damping):
+The velocity update (with damping):
 
 ```
 v_i ← v_i · (1 - friction) + (Σ_j F(|r_ij|, A[k_i][k_j]) · r̂_ij · force_scale) · δt
 x_i ← x_i + v_i · δt     (toroidal wrap)
+
+where:
+  v_i          — velocity of particle i
+  x_i          — position of particle i
+  r̂_ij         — unit direction vector from particle i to j
+  A[k_i][k_j]  — interaction matrix entry for particle types k_i and k_j
+  force_scale = 5.0   — global force multiplier
+  friction = 0.05     — velocity damping per tick (prevents runaway speeds)
+  δt = 0.02           — integration timestep
+  K = 6               — number of particle types
+  N                   — total number of particles
 ```
 
 **Controls**: `Shift+P` to enter, `Space` run/pause, `R` randomize
@@ -805,7 +979,9 @@ SHARK:
 ```
 
 The population dynamics approximate the continuous Lotka-Volterra system:
-`dx/dt = αx - βxy`, `dy/dt = δxy - γy`.
+`dx/dt = αx - βxy`, `dy/dt = δxy - γy`, where `x` = prey population,
+`y` = predator population, `α` = prey birth rate, `β` = predation rate,
+`δ` = predator growth from feeding, `γ` = predator death rate.
 
 **Controls**: `Shift+E` to enter, `Space` run/pause, `+/-` speed,
 `P/N` presets.
@@ -831,7 +1007,6 @@ systems.
 1. Sense:    s_L = T(x + d·cos(φ - θ_s), y + d·sin(φ - θ_s))
              s_C = T(x + d·cos(φ),        y + d·sin(φ))
              s_R = T(x + d·cos(φ + θ_s), y + d·sin(φ + θ_s))
-             (d = sensor_dist, θ_s = sensor_angle)
 
 2. Rotate:   if s_C ≥ s_L and s_C ≥ s_R:  φ unchanged  (straight)
              elif s_L > s_R:               φ -= θ_turn
@@ -844,10 +1019,24 @@ systems.
 4. Deposit:  T(⌊y⌋, ⌊x⌋) += deposit_amount
 
 5. Diffuse:  T_new(r,c) = ((1-k_d)·T(r,c) + k_d·avg₃ₓ₃(T)) · (1 - decay)
+
+where:
+  (x, y)         — agent position (continuous coordinates)
+  φ               — agent heading angle (radians)
+  T(r, c)         — pheromone trail intensity at grid cell (r, c)
+  s_L, s_C, s_R   — trail readings at left, center, and right sensor positions
+  d               — sensor distance (how far ahead the agent looks)
+  θ_s             — sensor angle (angular offset for left/right sensors from heading)
+  θ_turn          — turn angle (how much the agent rotates per step)
+  deposit_amount  — pheromone deposited by each agent per step
+  k_d             — diffusion kernel weight (blend ratio: 0 = no diffusion, 1 = full blur)
+  avg₃ₓ₃(T)      — mean of 3×3 neighborhood (smooths the trail field)
+  decay           — trail decay rate per tick (fraction of trail lost)
+  W, H            — grid width and height (toroidal boundary)
 ```
 
 **Presets**: network, ring, maze-solver, tendrils, dense — each with different
-`sensor_dist`, `sensor_angle`, `θ_turn`, `deposit_amount`, `k_d`, `decay`.
+`d`, `θ_s`, `θ_turn`, `deposit_amount`, `k_d`, `decay`.
 
 **Controls**: `Shift+S` to enter, `Space` run/pause, `P/N` presets,
 `+/-` speed.
@@ -878,13 +1067,28 @@ Alignment:   f_ali = (Σ_{j: |r_ij|<R_a} v_j) / n_a - v_i
 Cohesion:    f_coh = (Σ_{j: |r_ij|<R_c} r_ij) / n_c
 
 v_i ← v_i + w_s · f_sep + w_a · f_ali + w_c · f_coh
+
+where:
+  x_i, v_i    — position and velocity of boid i
+  r_ij         — displacement vector from boid i to boid j
+  r̂_ij         — unit direction vector from i to j
+  |r_ij|       — distance between boids i and j
+  n_a, n_c     — number of neighbors within alignment / cohesion radii
+  f_sep        — separation force (steers away from crowding; inversely proportional to distance²)
+  f_ali        — alignment force (steers toward neighbors' average heading)
+  f_coh        — cohesion force (steers toward neighbors' average position)
+  R_s = 2.0    — separation perception radius (only nearby boids trigger avoidance)
+  R_a = 4.0    — alignment perception radius
+  R_c = 8.0    — cohesion perception radius
+  w_s = 0.02   — separation weight
+  w_a = 0.05   — alignment weight
+  w_c = 0.005  — cohesion weight
+  v_min = 0.3  — minimum speed (boids never stop)
+  v_max = 1.5  — maximum speed
 ```
 
-Speed clamping: `v_min ≤ |v_i| ≤ v_max` (default 0.3, 1.5). Position update
-with toroidal wrap: `x_i ← (x_i + v_i) mod (W, H)`.
-
-Default weights: `w_s = 0.02`, `w_a = 0.05`, `w_c = 0.005`. Default radii:
-`R_s = 2.0`, `R_a = 4.0`, `R_c = 8.0`.
+Speed clamping: `v_min ≤ |v_i| ≤ v_max`. Position update with toroidal wrap:
+`x_i ← (x_i + v_i) mod (W, H)`.
 
 **Presets**: classic, tight, loose, predator, murmuration, school.
 
@@ -910,15 +1114,21 @@ Grid cells are in one of four states: `{EMPTY, TREE, BURNING, CHARRED}`. At
 each tick (von Neumann neighborhood):
 
 ```
-TREE     → BURNING     if any neighbor is BURNING (deterministic)
-TREE     → BURNING     with probability p_lightning (spontaneous)
+TREE     → BURNING     if any neighbor is BURNING (deterministic ignition)
+TREE     → BURNING     with probability p_lightning (spontaneous lightning strike)
 BURNING  → CHARRED     (deterministic, every tick)
-CHARRED  → EMPTY       after cooldown ticks (default 3-5)
-EMPTY    → TREE        with probability p_grow
+CHARRED  → EMPTY       after cooldown ticks expire
+EMPTY    → TREE        with probability p_grow (stochastic regrowth)
+
+where:
+  p_grow       — probability an empty cell grows a tree per tick
+  p_lightning  — probability a tree spontaneously ignites per tick (very small)
+  cooldown     — number of ticks a charred cell remains before becoming empty (default 3-5)
+  p_c ≈ 0.5927 — 2D site percolation threshold (critical tree density)
 ```
 
-Near the percolation threshold (`p_c ≈ 0.5927`), fire cascade sizes follow
-a power-law distribution `P(s) ~ s^{-τ}`.
+Near `p_c`, fire cascade sizes follow a power-law distribution `P(s) ~ s^{-τ}`
+(where `s` is cascade size and `τ` is the critical exponent).
 
 **Presets**: classic, dense-forest, sparse-dry, percolation-threshold,
 regrowth, inferno — varying `p_grow`, `p_lightning`, `cooldown`.
@@ -945,21 +1155,31 @@ Neumann neighborhood):
 ```
 SUSCEPTIBLE with k infected neighbors:
     P(infection) = 1 - (1 - β)^k
-    Infect with this probability (each neighbor independently transmits).
+    Infect with this probability.
 
 INFECTED:
     With probability γ:
         → DEAD       with probability μ
         → RECOVERED  with probability 1 - μ
+
+where:
+  β          — transmission probability per infected neighbor per tick
+  k          — number of infected von Neumann neighbors (0-4)
+  (1 - β)^k  — probability of escaping infection from all k neighbors
+  γ          — recovery probability per tick (inverse of average infection duration)
+  μ          — mortality probability (chance of death upon recovery)
+  R₀ = β/γ   — basic reproduction number (epidemic grows if R₀ > 1)
 ```
 
-The basic reproduction number `R₀ = β/γ` determines epidemic growth. The
-continuous mean-field ODE approximation:
+The continuous mean-field ODE approximation (well-mixed population):
 
 ```
 dS/dt = -βSI
 dI/dt = βSI - γI
 dR/dt = γI
+
+where:
+  S, I, R ∈ [0, 1] — fraction of population that is susceptible, infected, recovered
 ```
 
 **Presets**: classic, highly-contagious, deadly-plague, slow-burn,
@@ -993,12 +1213,20 @@ A grid of cells, each holding a set of possible tiles `P(r,c) ⊆ {0, ..., 5}`
               (r*,c*) = argmin_{|P(r,c)|>1} (|P(r,c)| + ξ),  ξ ~ U(-0.1, 0.1)
 
 2. Collapse:  Choose tile t ∈ P(r*,c*) with weighted probability:
-              P(t) = w_t / Σ_{t'∈P} w_{t'}
+              Prob(t) = w_t / Σ_{t'∈P} w_{t'}
 
 3. Propagate: BFS from (r*,c*). For each neighbor n of current cell c:
               P(n) ← P(n) ∩ {t : ∃ s ∈ P(c) with t ∈ A[s] and s ∈ A[t]}
               If P(n) changed, add n's neighbors to queue.
               If P(n) = ∅, contradiction (mark failed).
+
+where:
+  P(r, c)    — set of possible tiles at cell (r, c) (starts as {0,...,5}, shrinks)
+  |P(r, c)|  — number of remaining tile options (entropy proxy)
+  ξ          — small random noise for tiebreaking when multiple cells have equal entropy
+  w_t        — weight for tile t (higher weight = more likely to be chosen)
+  A[t]       — adjacency set: tiles allowed to neighbor tile t
+  BFS        — breadth-first search (propagates constraints outward from collapsed cell)
 ```
 
 Default adjacency (terrain): water↔{water, sand}, sand↔{water, sand, grass},
@@ -1031,9 +1259,18 @@ transition table `δ[q][g]` defines the update rule:
 (color_new, turn, q_new) = δ[q][g(r,c)]
 
 g(r, c) ← color_new
-d ← (d + turn) mod 4         (turn: 0=none, 1=right, 2=u-turn, 3=left)
-(r, c) ← (r, c) + Δ(d)      (Δ: UP=(-1,0), RIGHT=(0,1), DOWN=(1,0), LEFT=(0,-1))
-q ← q_new                    (toroidal boundary)
+d ← (d + turn) mod 4
+(r, c) ← (r, c) + Δ(d)
+q ← q_new
+
+where:
+  (r, c)     — agent position on the grid (toroidal boundary)
+  q          — internal state of the agent (finite state machine)
+  d          — direction index: 0=UP, 1=RIGHT, 2=DOWN, 3=LEFT
+  g(r, c)    — color of the grid cell at (r, c), range {0, ..., C-1}
+  δ[q][g]    — transition table: maps (state, color) → (new_color, turn, new_state)
+  turn       — rotation: 0=none, 1=right 90°, 2=u-turn 180°, 3=left 90°
+  Δ(d)       — direction vector: UP=(-1,0), RIGHT=(0,1), DOWN=(1,0), LEFT=(0,-1)
 ```
 
 Langton's Ant is the simplest case: `δ[0][0] = (1, 1, 0)` (white → black,
@@ -1079,9 +1316,16 @@ carve-able):
 *Braiding*: after generation, for each wall cell with ≥ 2 adjacent path cells,
 remove it with probability `p_loop` (creating cycles).
 
-*A\* solver*: cost function `f(n) = g(n) + h(n)` where `g(n)` is the path
-length from start and `h(n) = |r - r_end| + |c - c_end|` (Manhattan
-distance). Each step costs 1.0 (uniform grid).
+*A\* solver*: cost function `f(n) = g(n) + h(n)`:
+
+```
+where:
+  n         — a cell being evaluated
+  g(n)      — actual path cost from start to n (each step costs 1.0)
+  h(n)      — heuristic estimate from n to goal: Manhattan distance |r - r_end| + |c - c_end|
+  f(n)      — total estimated cost (cells with lowest f are explored first)
+  p_loop    — braiding probability (chance of removing a wall to create loops)
+```
 
 **Presets**: classic (`p_loop = 0`), braided (0.3), sparse (0.1), dense, speed-run.
 
@@ -1105,13 +1349,20 @@ Player at position `(p_x, p_y)` with viewing angle `φ` and field of view
 `FOV` (default `π/3`). For each screen column `col ∈ [0, W)`:
 
 ```
-θ = φ - FOV/2 + (col/W) · FOV       (ray angle)
+θ = φ - FOV/2 + (col/W) · FOV
+
+where:
+  φ         — player's viewing angle (radians, 0 = east)
+  FOV       — field of view (default π/3 radians = 60°)
+  col       — screen column index (0 to W-1)
+  W         — screen width in columns
+  θ         — angle of the ray cast for this column
 ```
 
 DDA (Digital Differential Analyzer) marches through the grid:
 
 ```
-δ_x = |1 / cos θ|,   δ_y = |1 / sin θ|     (step distances)
+δ_x = |1 / cos θ|,   δ_y = |1 / sin θ|
 
 Initialize side distances from player position to first grid line.
 While not hit and depth < 30:
@@ -1122,6 +1373,13 @@ While not hit and depth < 30:
         side_y += δ_y,  advance map_y
         depth = side_y - δ_y
     if grid[map_y][map_x] = WALL: hit
+
+where:
+  (p_x, p_y)     — player position (fractional grid coordinates)
+  (map_x, map_y) — current grid cell being tested
+  δ_x, δ_y       — distance the ray must travel to cross one grid line (x or y)
+  side_x, side_y  — cumulative distance to next x / y grid line
+  depth           — total ray travel distance when wall is hit
 ```
 
 Fish-eye correction and wall rendering:
@@ -1129,6 +1387,10 @@ Fish-eye correction and wall rendering:
 ```
 perp_dist = depth · cos(θ - φ)
 wall_height = screen_height / perp_dist
+
+where:
+  perp_dist    — perpendicular distance to wall (removes fish-eye distortion)
+  wall_height  — on-screen height of the wall column (taller = closer)
 ```
 
 **Presets**: classic, braided, sparse, wide-fov (`FOV = π/2`), speed-run.
@@ -1171,10 +1433,20 @@ n = 0
 while n < max_iter and z_r² + z_i² ≤ 4:
     (z_r, z_i) ← (z_r² - z_i² + c_r,  2·z_r·z_i + c_i)
     n += 1
-```
 
-Escape radius: `|z|² > 4` (equivalently `|z| > 2`). The iteration count `n`
-maps to a color via the selected palette.
+where:
+  z = z_r + z_i·i  — complex number being iterated (real and imaginary parts)
+  c = c_r + c_i·i  — complex parameter (grid coordinate or fixed Julia param)
+  z₀              — initial value of z (0 for Mandelbrot, grid point for Julia)
+  max_iter        — maximum iterations before declaring the point "in the set"
+  |z|² = z_r² + z_i²  — squared magnitude (escape test)
+  4               — escape radius squared (|z| > 2 means the orbit diverges)
+  n               — escape iteration count (mapped to color via palette)
+  (re, im)        — complex coordinate of the grid point being tested
+  zoom            — magnification factor (higher = deeper zoom into the fractal)
+  center_re, center_im — center of the viewport in complex coordinates
+  aspect          — width/height ratio of the terminal
+```
 
 **Preset parameters:**
 
@@ -1212,9 +1484,13 @@ dx/dt = σ(y - x)
 dy/dt = x(ρ - z) - y
 dz/dt = xy - βz
 
-x ← x + σ(y - x)·δt
-y ← y + (x(ρ - z) - y)·δt
-z ← z + (xy - βz)·δt
+where:
+  (x, y, z)  — state variables (represent convective flow amplitude, temperature
+               difference, and vertical temperature profile distortion)
+  σ (sigma)  — Prandtl number (ratio of viscous to thermal diffusion)
+  ρ (rho)    — Rayleigh number (driving force; chaos onset at ρ ≈ 24.74)
+  β (beta)   — geometric factor of the convection cell
+  δt         — Euler integration timestep
 ```
 
 **Rossler system** (Euler integration):
@@ -1223,13 +1499,24 @@ z ← z + (xy - βz)·δt
 dx/dt = -y - z
 dy/dt = x + ay
 dz/dt = b + z(x - c)
+
+where:
+  (x, y, z)  — state variables
+  a           — controls the speed of x-y oscillation
+  b           — controls the z "kick" magnitude
+  c           — controls when z grows large (folding threshold; chaos onset ≈ c > 5)
 ```
 
 **Henon map** (discrete):
 
 ```
-x_{n+1} = 1 - ax_n² + y_n
-y_{n+1} = bx_n
+x_{n+1} = 1 - a·x_n² + y_n
+y_{n+1} = b·x_n
+
+where:
+  (x_n, y_n)  — state at iteration n
+  a            — nonlinearity parameter (classic: 1.4; controls folding/stretching)
+  b            — contraction parameter (classic: 0.3; controls area contraction per step)
 ```
 
 Divergence check: if `|x|, |y|, or |z| > 10⁶`, reset to `(1, 1, 1)`.
