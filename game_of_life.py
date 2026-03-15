@@ -832,6 +832,151 @@ class SandGrid:
                     return
 
 
+# ---------------------------------------------------------------------------
+# Reaction-Diffusion (Gray-Scott model) — presets and grid
+# ---------------------------------------------------------------------------
+
+# Gray-Scott presets: (feed_rate, kill_rate) — each produces distinct patterns
+RD_PRESETS = {
+    "Mitosis": {"f": 0.0367, "k": 0.0649},    # self-replicating spots
+    "Coral": {"f": 0.0545, "k": 0.062},        # coral-like branching growth
+    "Maze": {"f": 0.029, "k": 0.057},          # labyrinthine stripes
+    "Solitons": {"f": 0.03, "k": 0.06},        # stable moving spots
+    "Worms": {"f": 0.078, "k": 0.061},         # long worm-like structures
+    "Bubbles": {"f": 0.012, "k": 0.05},        # expanding rings / bubbles
+    "Waves": {"f": 0.014, "k": 0.054},         # pulsating wave patterns
+}
+
+RD_PRESET_NAMES = list(RD_PRESETS.keys())
+
+# Shade characters for rendering chemical U concentration (5 levels)
+RD_SHADES = " ░▒▓█"
+
+
+class ReactionDiffusionGrid:
+    """Gray-Scott reaction-diffusion model.
+
+    Two chemicals U and V diffuse across a 2D grid and react:
+        U + 2V → 3V   (autocatalytic conversion)
+        V → P          (V decays to inert product)
+
+    Parameters:
+        Du, Dv  — diffusion rates for U and V
+        f       — feed rate (replenishes U, removes V)
+        k       — kill rate (removes V)
+
+    The interplay of diffusion, reaction, feed, and kill produces
+    Turing patterns: spots, stripes, spirals, and more.
+    """
+
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        # U starts at 1.0 everywhere, V starts at 0.0
+        self.U: list[list[float]] = [[1.0] * width for _ in range(height)]
+        self.V: list[list[float]] = [[0.0] * width for _ in range(height)]
+        self.toroidal = True
+        # Diffusion rates
+        self.Du = 0.21
+        self.Dv = 0.105
+        # Reaction parameters (default: Mitosis)
+        preset = RD_PRESETS["Mitosis"]
+        self.f = preset["f"]
+        self.k = preset["k"]
+        # Time step (multiple sub-steps per visible tick for stability)
+        self.dt = 1.0
+        self.substeps = 4
+
+    def apply_preset(self, name: str) -> None:
+        """Switch to a named Gray-Scott preset."""
+        if name in RD_PRESETS:
+            p = RD_PRESETS[name]
+            self.f = p["f"]
+            self.k = p["k"]
+
+    def clear(self) -> None:
+        """Reset to uniform U=1, V=0."""
+        for r in range(self.height):
+            for c in range(self.width):
+                self.U[r][c] = 1.0
+                self.V[r][c] = 0.0
+
+    def seed_center(self) -> None:
+        """Place a square seed of V in the center with small perturbations."""
+        self.clear()
+        cx, cy = self.width // 2, self.height // 2
+        radius = max(3, min(self.width, self.height) // 10)
+        for r in range(max(0, cy - radius), min(self.height, cy + radius + 1)):
+            for c in range(max(0, cx - radius), min(self.width, cx + radius + 1)):
+                self.U[r][c] = 0.5 + random.uniform(-0.01, 0.01)
+                self.V[r][c] = 0.25 + random.uniform(-0.01, 0.01)
+
+    def seed_random_spots(self) -> None:
+        """Place several random seed spots of V across the grid."""
+        self.clear()
+        num_spots = max(3, (self.width * self.height) // 600)
+        for _ in range(num_spots):
+            cr = random.randint(0, self.height - 1)
+            cc = random.randint(0, self.width - 1)
+            spot_r = random.randint(2, 4)
+            for r in range(max(0, cr - spot_r), min(self.height, cr + spot_r + 1)):
+                for c in range(max(0, cc - spot_r), min(self.width, cc + spot_r + 1)):
+                    self.U[r][c] = 0.5 + random.uniform(-0.01, 0.01)
+                    self.V[r][c] = 0.25 + random.uniform(-0.01, 0.01)
+
+    def _laplacian(self, grid: list[list[float]], r: int, c: int) -> float:
+        """Compute discrete Laplacian at (r, c) using a 5-point stencil."""
+        h, w = self.height, self.width
+        if self.toroidal:
+            up = grid[(r - 1) % h][c]
+            dn = grid[(r + 1) % h][c]
+            lt = grid[r][(c - 1) % w]
+            rt = grid[r][(c + 1) % w]
+        else:
+            up = grid[r - 1][c] if r > 0 else grid[r][c]
+            dn = grid[r + 1][c] if r < h - 1 else grid[r][c]
+            lt = grid[r][c - 1] if c > 0 else grid[r][c]
+            rt = grid[r][c + 1] if c < w - 1 else grid[r][c]
+        return up + dn + lt + rt - 4.0 * grid[r][c]
+
+    def tick(self) -> None:
+        """Advance one visible time step (multiple sub-steps for stability)."""
+        dt = self.dt / self.substeps
+        for _ in range(self.substeps):
+            newU = [[0.0] * self.width for _ in range(self.height)]
+            newV = [[0.0] * self.width for _ in range(self.height)]
+            for r in range(self.height):
+                for c in range(self.width):
+                    u = self.U[r][c]
+                    v = self.V[r][c]
+                    lapU = self._laplacian(self.U, r, c)
+                    lapV = self._laplacian(self.V, r, c)
+                    uvv = u * v * v
+                    nu = u + dt * (self.Du * lapU - uvv + self.f * (1.0 - u))
+                    nv = v + dt * (self.Dv * lapV + uvv - (self.f + self.k) * v)
+                    newU[r][c] = max(0.0, min(1.0, nu))
+                    newV[r][c] = max(0.0, min(1.0, nv))
+            self.U = newU
+            self.V = newV
+
+    def population(self) -> float:
+        """Total V chemical concentration (mass)."""
+        total = 0.0
+        for r in range(self.height):
+            for c in range(self.width):
+                total += self.V[r][c]
+        return total
+
+    def active_count(self) -> int:
+        """Number of cells where V > 0.01."""
+        count = 0
+        for r in range(self.height):
+            for c in range(self.width):
+                if self.V[r][c] > 0.01:
+                    count += 1
+        return count
+
+
 class LeniaGrid:
     """Continuous-state cellular automaton grid (Lenia).
 
@@ -1475,6 +1620,11 @@ class App:
         self.sand_gen = 0
         self.sand_material_idx = 0  # index into SAND_MATERIALS
         self.sand_brush_size = 2    # brush radius for placing material
+        # Reaction-Diffusion (Gray-Scott) mode
+        self.rd_mode = False
+        self.rd_grid: ReactionDiffusionGrid | None = None
+        self.rd_gen = 0
+        self.rd_preset_idx = 0  # index into RD_PRESET_NAMES
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -1503,6 +1653,9 @@ class App:
             elif self.sand_mode:
                 if self.running:
                     self._sand_tick()
+            elif self.rd_mode:
+                if self.running:
+                    self._rd_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -1569,6 +1722,12 @@ class App:
             curses.init_pair(31, curses.COLOR_RED, -1)     # Fire
             curses.init_pair(32, curses.COLOR_WHITE, -1)   # Stone
             curses.init_pair(33, curses.COLOR_GREEN, -1)   # Plant
+            # Reaction-Diffusion gradient (chemical V concentration)
+            curses.init_pair(34, curses.COLOR_BLUE, -1)    # RD: low V
+            curses.init_pair(35, curses.COLOR_CYAN, -1)    # RD: low-mid V
+            curses.init_pair(36, curses.COLOR_GREEN, -1)   # RD: mid V
+            curses.init_pair(37, curses.COLOR_YELLOW, -1)  # RD: mid-high V
+            curses.init_pair(38, curses.COLOR_RED, -1)     # RD: high V (bright)
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -1627,6 +1786,10 @@ class App:
         # Falling sand mode has its own input handler
         if self.sand_mode:
             return self._handle_sand_input(key)
+
+        # Reaction-Diffusion mode has its own input handler
+        if self.rd_mode:
+            return self._handle_rd_input(key)
 
         # Split mode has limited input
         if self.split_mode:
@@ -1811,6 +1974,10 @@ class App:
         # Falling sand simulation mode
         elif key == ord("F"):
             self._start_sand()
+
+        # Reaction-Diffusion (Gray-Scott) mode
+        elif key == ord("R"):
+            self._start_rd()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -2739,6 +2906,188 @@ class App:
             except curses.error:
                 pass
 
+    # --- Reaction-Diffusion (Gray-Scott) mode ---
+
+    def _handle_rd_input(self, key: int) -> bool:
+        """Handle input while in reaction-diffusion mode."""
+        if key == ord("q"):
+            return False
+        # Run / pause
+        elif key == ord(" "):
+            self.running = not self.running
+        # Step
+        elif key == ord("s"):
+            if not self.running:
+                self._rd_tick()
+        # Randomize
+        elif key == ord("r"):
+            if self.rd_grid:
+                self.rd_grid.seed_random_spots()
+                self.rd_gen = 0
+                self._set_message("Randomized")
+        # Clear
+        elif key == ord("c"):
+            if self.rd_grid:
+                self.rd_grid.clear()
+                self.rd_gen = 0
+                self._set_message("Cleared")
+        # Seed center
+        elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
+            if self.rd_grid:
+                self.rd_grid.seed_center()
+                self.rd_gen = 0
+                self._set_message("Seeded center")
+        # Cycle preset with F/G
+        elif key == ord("f"):
+            self.rd_preset_idx = (self.rd_preset_idx + 1) % len(RD_PRESET_NAMES)
+            self._switch_rd_preset()
+        elif key == ord("g"):
+            self.rd_preset_idx = (self.rd_preset_idx - 1) % len(RD_PRESET_NAMES)
+            self._switch_rd_preset()
+        # Speed control
+        elif key in (ord("+"), ord("="), ord("]")):
+            self.speed = min(20, self.speed + 1)
+            self._update_timeout()
+        elif key in (ord("-"), ord("_"), ord("[")):
+            self.speed = max(1, self.speed - 1)
+            self._update_timeout()
+        # Toroidal toggle
+        elif key == ord("t"):
+            if self.rd_grid:
+                self.rd_grid.toroidal = not self.rd_grid.toroidal
+                mode = "ON" if self.rd_grid.toroidal else "OFF"
+                self._set_message(f"Toroidal wrapping {mode}")
+        # Exit RD mode
+        elif key == ord("R") or key == 27:
+            self._stop_rd()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_rd(self) -> None:
+        """Enter reaction-diffusion (Gray-Scott) mode."""
+        self.running = False
+        self.rd_mode = True
+        self.rd_gen = 0
+        self.rd_preset_idx = 0
+        max_h, max_w = self.stdscr.getmaxyx()
+        w = max(1, max_w // 2)
+        h = max(1, max_h - 3)
+        self.rd_grid = ReactionDiffusionGrid(w, h)
+        self.rd_grid.seed_center()
+        preset = RD_PRESET_NAMES[self.rd_preset_idx]
+        self._set_message(
+            f"Reaction-Diffusion — {preset} | [F/G]Preset [Space]Run [S]tep [R]and [Enter]Seed [R]Exit"
+        )
+
+    def _stop_rd(self) -> None:
+        """Exit reaction-diffusion mode."""
+        self.rd_mode = False
+        self.running = False
+        self.rd_grid = None
+        self.rd_gen = 0
+        self._set_message("Reaction-Diffusion mode ended")
+
+    def _switch_rd_preset(self) -> None:
+        """Switch to a different Gray-Scott preset."""
+        preset = RD_PRESET_NAMES[self.rd_preset_idx]
+        if self.rd_grid:
+            self.rd_grid.apply_preset(preset)
+            self.rd_grid.seed_center()
+        self.rd_gen = 0
+        self.running = False
+        self._set_message(
+            f"RD — {preset} | f={self.rd_grid.f:.4f} k={self.rd_grid.k:.4f}"
+            if self.rd_grid else f"RD — {preset}"
+        )
+
+    def _rd_tick(self) -> None:
+        """Advance one reaction-diffusion generation."""
+        if self.rd_grid:
+            self.rd_grid.tick()
+            self.rd_gen += 1
+
+    def _rd_cell_attr(self, v_value: float) -> tuple[str, int]:
+        """Return (shade_char, curses attr) for V concentration in [0, 1]."""
+        if v_value < 0.01:
+            return "  ", 0
+        # Map to shade index (1-4)
+        idx = min(4, max(1, int(v_value * 4.99)))
+        shade = RD_SHADES[idx]
+        ch = shade + shade  # double-wide for square cells
+        # Color gradient based on V concentration
+        if v_value < 0.1:
+            pair = 34  # blue/dim
+            extra = curses.A_DIM
+        elif v_value < 0.2:
+            pair = 35  # cyan
+            extra = 0
+        elif v_value < 0.35:
+            pair = 36  # green
+            extra = 0
+        elif v_value < 0.5:
+            pair = 37  # yellow
+            extra = 0
+        else:
+            pair = 38  # red/bright
+            extra = curses.A_BOLD
+        attr = (curses.color_pair(pair) | extra) if self.use_color else extra
+        return ch, attr
+
+    def _draw_rd(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the reaction-diffusion grid."""
+        if not self.rd_grid:
+            return
+        rg = self.rd_grid
+
+        for screen_r in range(min(grid_rows, rg.height)):
+            for screen_c in range(min(grid_cols, rg.width)):
+                x = screen_c * 2
+                if x + 1 >= max_w:
+                    break
+                value = rg.V[screen_r][screen_c]
+                ch, attr = self._rd_cell_attr(value)
+                try:
+                    self.stdscr.addstr(screen_r, x, ch, attr)
+                except curses.error:
+                    pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            preset = RD_PRESET_NAMES[self.rd_preset_idx]
+            state_str = "RUNNING" if self.running else "PAUSED"
+            topo = "Torus" if rg.toroidal else "Bounded"
+            mass = rg.population()
+            active = rg.active_count()
+            status = (
+                f" Gray-Scott RD: {preset} | Gen: {self.rd_gen} | "
+                f"V-mass: {mass:.1f} Active: {active} | "
+                f"f={rg.f:.4f} k={rg.k:.4f} | Speed: {self.speed} | {topo} | {state_str} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            preset = RD_PRESET_NAMES[self.rd_preset_idx]
+            help_text = (
+                f" [Space]Run [S]tep [R]and [C]lear [Enter]Seed | "
+                f"[F/G]Preset:{preset} | "
+                f"░▒▓█ V concentration | [+/-]Spd [T]orus [R]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -3068,6 +3417,8 @@ class App:
             self._draw_multistate(max_h, max_w, grid_rows, grid_cols)
         elif self.sand_mode:
             self._draw_sand(max_h, max_w, grid_rows, grid_cols)
+        elif self.rd_mode:
+            self._draw_rd(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
