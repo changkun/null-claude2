@@ -817,6 +817,12 @@ class App:
         self.split_gen = 0
         self.split_pop_left: list[int] = []
         self.split_pop_right: list[int] = []
+        # Wolfram 1D elementary cellular automaton mode
+        self.wolfram_mode = False
+        self.wolfram_rule = 30  # Wolfram rule number (0-255)
+        self.wolfram_rows: list[list[bool]] = []  # computed rows of cells
+        self.wolfram_generation = 0
+        self.wolfram_notable = [30, 54, 60, 90, 110, 150, 182, 184, 250]
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -833,7 +839,10 @@ class App:
         while True:
             if not self._handle_input():
                 break
-            if self.split_mode:
+            if self.wolfram_mode:
+                if self.running:
+                    self._wolfram_tick()
+            elif self.split_mode:
                 if self.running:
                     self._split_tick()
             elif self.evolve_mode:
@@ -921,6 +930,10 @@ class App:
         # Blueprint mode has its own input handler
         if self.blueprint_mode:
             return self._handle_blueprint_input(key)
+
+        # Wolfram 1D mode has its own input handler
+        if self.wolfram_mode:
+            return self._handle_wolfram_input(key)
 
         # Split mode has limited input
         if self.split_mode:
@@ -1089,6 +1102,10 @@ class App:
                 self._set_message("Heatmap ON — tracking cell activity")
             else:
                 self._set_message("Heatmap OFF")
+
+        # Wolfram 1D elementary CA mode
+        elif key == ord("W"):
+            self._start_wolfram()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -1365,6 +1382,132 @@ class App:
         if hi == lo:
             return bars[3] * len(values)
         return "".join(bars[round((v - lo) / (hi - lo) * 7)] for v in values)
+
+    # --- Wolfram 1D elementary cellular automaton mode ---
+
+    def _handle_wolfram_input(self, key: int) -> bool:
+        """Handle input while in Wolfram 1D mode."""
+        if key == ord("q"):
+            return False
+        elif key == ord(" "):
+            self.running = not self.running
+        elif key == ord("s"):
+            if not self.running:
+                self._wolfram_tick()
+        elif key in (ord("+"), ord("="), ord("]")):
+            self.speed = min(20, self.speed + 1)
+            self._update_timeout()
+        elif key in (ord("-"), ord("_"), ord("[")):
+            self.speed = max(1, self.speed - 1)
+            self._update_timeout()
+        # Cycle through notable rules
+        elif key in (ord("f"), curses.KEY_RIGHT):
+            idx = -1
+            for i, r in enumerate(self.wolfram_notable):
+                if r == self.wolfram_rule:
+                    idx = i
+                    break
+            if idx >= 0:
+                self.wolfram_rule = self.wolfram_notable[(idx + 1) % len(self.wolfram_notable)]
+            else:
+                self.wolfram_rule = self.wolfram_notable[0]
+            self._wolfram_reset()
+            self._set_message(f"Rule {self.wolfram_rule}")
+        elif key in (ord("g"), curses.KEY_LEFT):
+            idx = -1
+            for i, r in enumerate(self.wolfram_notable):
+                if r == self.wolfram_rule:
+                    idx = i
+                    break
+            if idx >= 0:
+                self.wolfram_rule = self.wolfram_notable[(idx - 1) % len(self.wolfram_notable)]
+            else:
+                self.wolfram_rule = self.wolfram_notable[-1]
+            self._wolfram_reset()
+            self._set_message(f"Rule {self.wolfram_rule}")
+        # Enter a specific rule number
+        elif key == ord("#"):
+            text = self._text_prompt("Rule number (0-255): ")
+            if text:
+                try:
+                    num = int(text)
+                    if 0 <= num <= 255:
+                        self.wolfram_rule = num
+                        self._wolfram_reset()
+                        self._set_message(f"Rule {self.wolfram_rule}")
+                    else:
+                        self._set_message("Rule must be 0-255")
+                except ValueError:
+                    self._set_message("Invalid number")
+        # Randomize initial row
+        elif key == ord("r"):
+            self._wolfram_reset(randomize=True)
+            self._set_message("Randomized initial row")
+        # Reset to single center cell
+        elif key == ord("c"):
+            self._wolfram_reset()
+            self._set_message("Reset to center seed")
+        # Exit Wolfram mode
+        elif key == ord("W") or key == 27:
+            self._stop_wolfram()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_wolfram(self) -> None:
+        """Enter Wolfram 1D elementary CA mode."""
+        self.running = False
+        self.wolfram_mode = True
+        self._wolfram_reset()
+        self._set_message(
+            f"WOLFRAM 1D — Rule {self.wolfram_rule} | [F/G]Cycle rules [#]Enter rule [Space]Run [W]Exit"
+        )
+
+    def _stop_wolfram(self) -> None:
+        """Exit Wolfram 1D mode."""
+        self.wolfram_mode = False
+        self.running = False
+        self.wolfram_rows.clear()
+        self.wolfram_generation = 0
+        self._set_message("Wolfram mode ended")
+
+    def _wolfram_reset(self, randomize: bool = False) -> None:
+        """Reset the Wolfram automaton with a fresh initial row."""
+        max_h, max_w = self.stdscr.getmaxyx()
+        width = max(1, max_w // 2)
+        if randomize:
+            row = [random.random() < 0.5 for _ in range(width)]
+        else:
+            row = [False] * width
+            row[width // 2] = True
+        self.wolfram_rows = [row]
+        self.wolfram_generation = 0
+
+    def _wolfram_apply_rule(self, left: bool, center: bool, right: bool) -> bool:
+        """Apply the current Wolfram rule to a 3-cell neighborhood."""
+        index = (int(left) << 2) | (int(center) << 1) | int(right)
+        return bool(self.wolfram_rule & (1 << index))
+
+    def _wolfram_tick(self) -> None:
+        """Compute the next row of the Wolfram 1D automaton."""
+        if not self.wolfram_rows:
+            return
+        prev = self.wolfram_rows[-1]
+        width = len(prev)
+        new_row = [False] * width
+        for i in range(width):
+            left = prev[i - 1] if i > 0 else False
+            center = prev[i]
+            right = prev[i + 1] if i < width - 1 else False
+            new_row[i] = self._wolfram_apply_rule(left, center, right)
+        self.wolfram_rows.append(new_row)
+        self.wolfram_generation += 1
+
+        # Limit stored rows to what fits on screen + a buffer
+        max_h, _ = self.stdscr.getmaxyx()
+        max_rows = max(1, max_h - 3)
+        if len(self.wolfram_rows) > max_rows:
+            self.wolfram_rows = self.wolfram_rows[-max_rows:]
 
     # --- brush mode ---
 
@@ -1687,7 +1830,9 @@ class App:
         grid_rows = max(1, max_h - 3)
         grid_cols = max(1, max_w // 2)
 
-        if self.split_mode:
+        if self.wolfram_mode:
+            self._draw_wolfram(max_h, max_w, grid_rows, grid_cols)
+        elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
             self._draw_blueprint(max_h, max_w, grid_rows, grid_cols)
@@ -1830,7 +1975,7 @@ class App:
                 f" [Space]Run [S]tep [R]and [C]lear [Q]uit | "
                 f"[P/N]Pat: {pat_name}{custom_tag} [Enter]Place [Esc]Desel |"
                 f"{brush_info} | "
-                f"[F/G]Rule [D]ash [H]eat [A]Evolve [M]Split [B]lue [X]Del [L]RLE [+/-]Spd [T]orus [</>]Rew [W]Save [O]Load"
+                f"[F/G]Rule [D]ash [H]eat [A]Evolve [M]Split [W]olfram [B]lue [X]Del [L]RLE [+/-]Spd [T]orus [</>]Rew [w]Save [O]Load"
             )
             try:
                 self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
@@ -1942,6 +2087,127 @@ class App:
             help_text = (
                 f" SPLIT COMPARE: {name_l} vs {name_r} | "
                 f"[Space]Run/Pause [+/-]Speed [M]Exit split [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
+    def _draw_wolfram(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the Wolfram 1D elementary CA cascading rows."""
+        # Draw the rule diagram at the top-right corner
+        rule_diagram_w = 35
+        rule_y = 0
+
+        # Draw the cascading rows
+        for screen_r, row in enumerate(self.wolfram_rows[-grid_rows:]):
+            if screen_r >= grid_rows:
+                break
+            for screen_c in range(min(grid_cols, len(row))):
+                x = screen_c * 2
+                if x + 1 >= max_w:
+                    break
+                if row[screen_c]:
+                    # Color based on row age (newer rows at bottom are greener)
+                    total_rows = len(self.wolfram_rows)
+                    visible_start = max(0, total_rows - grid_rows)
+                    row_idx = visible_start + screen_r
+                    if self.use_color:
+                        # Gradient: green (new) -> cyan -> yellow -> red (old)
+                        if total_rows <= 1:
+                            pair = 1
+                        else:
+                            ratio = row_idx / max(total_rows - 1, 1)
+                            if ratio < 0.25:
+                                pair = 1   # green
+                            elif ratio < 0.5:
+                                pair = 5   # cyan
+                            elif ratio < 0.75:
+                                pair = 6   # yellow
+                            else:
+                                pair = 7   # red
+                        attr = curses.color_pair(pair)
+                    else:
+                        attr = curses.A_BOLD
+                    try:
+                        self.stdscr.addstr(screen_r, x, "██", attr)
+                    except curses.error:
+                        pass
+                # Dead cells are left as blank (erased background)
+
+        # Draw rule number badge in top-right
+        if max_w > rule_diagram_w + 2:
+            badge = f" Rule {self.wolfram_rule} "
+            badge_x = max_w - len(badge) - 1
+            badge_attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(0, badge_x, badge, badge_attr)
+            except curses.error:
+                pass
+
+            # Draw the 8 neighborhood outcomes for this rule
+            # Each outcome: 3 input cells -> 1 output cell
+            if max_w > 40 and grid_rows > 3:
+                outcomes_y = 1
+                outcomes_x = max_w - 34
+                label_attr = curses.color_pair(11) if self.use_color else curses.A_DIM
+                for bit in range(7, -1, -1):
+                    # The 3-bit input pattern
+                    left = bool(bit & 4)
+                    center = bool(bit & 2)
+                    right = bool(bit & 1)
+                    output = bool(self.wolfram_rule & (1 << bit))
+                    # Draw input pattern
+                    col_offset = (7 - bit) * 4
+                    cx = outcomes_x + col_offset
+                    if cx + 3 >= max_w:
+                        break
+                    inp = ("█" if left else "·") + ("█" if center else "·") + ("█" if right else "·")
+                    out = " " + ("█" if output else "·") + " "
+                    try:
+                        self.stdscr.addstr(outcomes_y, cx, inp, label_attr)
+                        self.stdscr.addstr(outcomes_y + 1, cx, out, label_attr)
+                    except curses.error:
+                        pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            state = "RUNNING" if self.running else "PAUSED"
+            alive = sum(1 for c in self.wolfram_rows[-1] if c) if self.wolfram_rows else 0
+            width = len(self.wolfram_rows[0]) if self.wolfram_rows else 0
+            rule_bin = format(self.wolfram_rule, "08b")
+            # Classify the rule
+            classification = ""
+            if self.wolfram_rule in (0, 8, 32, 40, 128, 136, 160, 168):
+                classification = " [Class I: uniform]"
+            elif self.wolfram_rule in (4, 12, 36, 44, 76, 108, 132, 140, 164, 172, 204, 232):
+                classification = " [Class II: periodic]"
+            elif self.wolfram_rule in (30, 45, 75, 86, 89, 101, 135, 149):
+                classification = " [Class III: chaotic]"
+            elif self.wolfram_rule in (54, 110, 124, 137, 193):
+                classification = " [Class IV: complex]"
+            status = (
+                f" WOLFRAM 1D | Rule {self.wolfram_rule} ({rule_bin}){classification} | "
+                f"Row: {self.wolfram_generation} | Alive: {alive}/{width} | "
+                f"Speed: {self.speed} | {state} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            notable_str = ",".join(str(r) for r in self.wolfram_notable)
+            help_text = (
+                f" [Space]Run [S]tep [F/G]Cycle rule ({notable_str}) "
+                f"[#]Enter rule [R]andom seed [C]enter seed [+/-]Speed [W/Esc]Exit [Q]uit"
             )
             try:
                 self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
