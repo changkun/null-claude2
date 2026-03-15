@@ -46,6 +46,10 @@ Press `?` or `/` at any time to open the **Mode Picker** menu.
 
 ## Simulation Modes
 
+Each mode has a scientific or mathematical background. See **[GUIDE.md](GUIDE.md)**
+for detailed descriptions of the algorithms, history, and parameters behind
+every simulation.
+
 ### Cellular Automata
 
 | Mode | Key | Description |
