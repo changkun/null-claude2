@@ -808,6 +808,15 @@ class App:
         # Evolve (genetic algorithm) mode state
         self.evolve_mode = False
         self.evolver: PatternEvolver | None = None
+        # Split-screen comparison mode state
+        self.split_mode = False
+        self.split_grid_left: Grid | None = None
+        self.split_grid_right: Grid | None = None
+        self.split_rule_left = 0   # index into RULESETS
+        self.split_rule_right = 1  # index into RULESETS
+        self.split_gen = 0
+        self.split_pop_left: list[int] = []
+        self.split_pop_right: list[int] = []
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -824,7 +833,10 @@ class App:
         while True:
             if not self._handle_input():
                 break
-            if self.evolve_mode:
+            if self.split_mode:
+                if self.running:
+                    self._split_tick()
+            elif self.evolve_mode:
                 self._evolve_tick()
             elif self.running and self.history_pos == -1:
                 self._record_history()
@@ -909,6 +921,10 @@ class App:
         # Blueprint mode has its own input handler
         if self.blueprint_mode:
             return self._handle_blueprint_input(key)
+
+        # Split mode has limited input
+        if self.split_mode:
+            return self._handle_split_input(key)
 
         # Quit
         if key == ord("q"):
@@ -1074,6 +1090,13 @@ class App:
             else:
                 self._set_message("Heatmap OFF")
 
+        # Split-screen comparison mode
+        elif key == ord("m"):
+            if self.split_mode:
+                self._stop_split()
+            else:
+                self._start_split()
+
         # Evolve (genetic algorithm) mode
         elif key == ord("a"):
             if self.evolve_mode:
@@ -1175,6 +1198,28 @@ class App:
 
         return True
 
+    def _handle_split_input(self, key: int) -> bool:
+        """Handle input while in split-screen comparison mode."""
+        if key == ord("q"):
+            return False
+        elif key == ord(" "):
+            self.running = not self.running
+        elif key in (ord("+"), ord("="), ord("]")):
+            self.speed = min(20, self.speed + 1)
+            self._update_timeout()
+        elif key in (ord("-"), ord("_"), ord("[")):
+            self.speed = max(1, self.speed - 1)
+            self._update_timeout()
+        elif key == ord("m") or key == 27:
+            self._stop_split()
+        elif key == ord("s"):
+            # Single step
+            if not self.running:
+                self._split_tick()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
     # --- rule explorer ---
 
     def _apply_ruleset(self) -> None:
@@ -1184,6 +1229,142 @@ class App:
         self.grid.survival = set(survival)
         rs = rule_string(self.grid.birth, self.grid.survival)
         self._set_message(f"Rule: {name} ({rs})")
+
+    # --- split-screen comparison mode ---
+
+    def _ruleset_menu(self, prompt: str, exclude: int | None = None) -> int | None:
+        """Show a menu to pick a ruleset. Returns index or None if cancelled."""
+        curses.curs_set(0)
+        self.stdscr.nodelay(False)
+        max_h, max_w = self.stdscr.getmaxyx()
+        selected = 0
+
+        while True:
+            self.stdscr.erase()
+            title = prompt
+            try:
+                self.stdscr.addstr(0, 0, title[:max_w - 1], curses.A_BOLD)
+            except curses.error:
+                pass
+            for i, (name, birth, survival) in enumerate(RULESETS):
+                rs = rule_string(birth, survival)
+                marker = " >> " if i == selected else "    "
+                label = f"{marker}{name} ({rs})"
+                if i == exclude:
+                    label += "  [already selected]"
+                attr = curses.A_REVERSE if i == selected else 0
+                if i + 2 < max_h:
+                    try:
+                        self.stdscr.addstr(i + 2, 0, label.ljust(max_w - 1)[:max_w - 1], attr)
+                    except curses.error:
+                        pass
+            footer = " [Up/Down] Navigate  [Enter] Select  [Esc] Cancel"
+            if len(RULESETS) + 3 < max_h:
+                try:
+                    self.stdscr.addstr(len(RULESETS) + 3, 0, footer[:max_w - 1], curses.A_DIM)
+                except curses.error:
+                    pass
+            self.stdscr.refresh()
+
+            key = self.stdscr.getch()
+            if key in (curses.KEY_UP, ord("k")):
+                selected = (selected - 1) % len(RULESETS)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                selected = (selected + 1) % len(RULESETS)
+            elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
+                self.stdscr.nodelay(True)
+                self._update_timeout()
+                return selected
+            elif key == 27:
+                self.stdscr.nodelay(True)
+                self._update_timeout()
+                return None
+
+    def _start_split(self) -> None:
+        """Enter split-screen comparison mode."""
+        if not self.grid.cells:
+            self._set_message("Place a pattern first — split needs a seed")
+            return
+
+        # Pick left ruleset
+        left = self._ruleset_menu("Select LEFT ruleset:")
+        if left is None:
+            self._set_message("Split cancelled")
+            return
+
+        # Pick right ruleset
+        right = self._ruleset_menu("Select RIGHT ruleset:", exclude=left)
+        if right is None:
+            self._set_message("Split cancelled")
+            return
+
+        if left == right:
+            self._set_message("Pick two different rulesets to compare")
+            return
+
+        self.split_rule_left = left
+        self.split_rule_right = right
+
+        # Clone current grid state into two independent grids
+        self.split_grid_left = Grid(self.grid.width, self.grid.height)
+        self.split_grid_left.cells = set(self.grid.cells)
+        self.split_grid_left.ages = dict(self.grid.ages)
+        self.split_grid_left.toroidal = self.grid.toroidal
+        _, birth_l, surv_l = RULESETS[left]
+        self.split_grid_left.birth = set(birth_l)
+        self.split_grid_left.survival = set(surv_l)
+
+        self.split_grid_right = Grid(self.grid.width, self.grid.height)
+        self.split_grid_right.cells = set(self.grid.cells)
+        self.split_grid_right.ages = dict(self.grid.ages)
+        self.split_grid_right.toroidal = self.grid.toroidal
+        _, birth_r, surv_r = RULESETS[right]
+        self.split_grid_right.birth = set(birth_r)
+        self.split_grid_right.survival = set(surv_r)
+
+        self.split_gen = 0
+        self.split_pop_left = []
+        self.split_pop_right = []
+        self.split_mode = True
+        self.running = False
+        name_l = RULESETS[left][0]
+        name_r = RULESETS[right][0]
+        self._set_message(f"Split: {name_l} vs {name_r} — [Space] run, [M] exit")
+
+    def _stop_split(self) -> None:
+        """Exit split-screen comparison mode."""
+        self.split_mode = False
+        self.running = False
+        self.split_grid_left = None
+        self.split_grid_right = None
+        self.split_pop_left.clear()
+        self.split_pop_right.clear()
+        self._set_message("Split mode ended")
+
+    def _split_tick(self) -> None:
+        """Advance both split grids one generation."""
+        if self.split_grid_left and self.split_grid_right:
+            self.split_grid_left.tick()
+            self.split_grid_right.tick()
+            self.split_gen += 1
+            self.split_pop_left.append(len(self.split_grid_left.cells))
+            self.split_pop_right.append(len(self.split_grid_right.cells))
+            if len(self.split_pop_left) > self.SPARKLINE_WIDTH:
+                self.split_pop_left = self.split_pop_left[-self.SPARKLINE_WIDTH:]
+            if len(self.split_pop_right) > self.SPARKLINE_WIDTH:
+                self.split_pop_right = self.split_pop_right[-self.SPARKLINE_WIDTH:]
+
+    def _split_sparkline(self, pop_history: list[int]) -> str:
+        """Return a sparkline for a split-screen population history."""
+        if not pop_history:
+            return ""
+        bars = "▁▂▃▄▅▆▇█"
+        values = pop_history[-20:]  # shorter sparkline to fit
+        lo = min(values)
+        hi = max(values)
+        if hi == lo:
+            return bars[3] * len(values)
+        return "".join(bars[round((v - lo) / (hi - lo) * 7)] for v in values)
 
     # --- brush mode ---
 
@@ -1506,7 +1687,9 @@ class App:
         grid_rows = max(1, max_h - 3)
         grid_cols = max(1, max_w // 2)
 
-        if self.blueprint_mode:
+        if self.split_mode:
+            self._draw_split(max_h, max_w, grid_rows, grid_cols)
+        elif self.blueprint_mode:
             self._draw_blueprint(max_h, max_w, grid_rows, grid_cols)
         else:
             self._draw_normal(max_h, max_w, grid_rows, grid_cols)
@@ -1647,7 +1830,118 @@ class App:
                 f" [Space]Run [S]tep [R]and [C]lear [Q]uit | "
                 f"[P/N]Pat: {pat_name}{custom_tag} [Enter]Place [Esc]Desel |"
                 f"{brush_info} | "
-                f"[F/G]Rule [D]ash [H]eat [A]Evolve [B]lue [X]Del [L]RLE [+/-]Spd [T]orus [</>]Rew [W]Save [O]Load"
+                f"[F/G]Rule [D]ash [H]eat [A]Evolve [M]Split [B]lue [X]Del [L]RLE [+/-]Spd [T]orus [</>]Rew [W]Save [O]Load"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
+    def _draw_split(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw side-by-side comparison of two grids under different rulesets."""
+        if not self.split_grid_left or not self.split_grid_right:
+            return
+
+        # Each panel gets half the screen width, with a 1-char divider
+        divider_x = max_w // 2
+        panel_w = divider_x // 2  # cells per panel (each cell = 2 chars)
+
+        # Compute viewport centered on the grid
+        vr = max(0, min(self.grid.height // 2 - grid_rows // 2, self.grid.height - grid_rows))
+        vc = max(0, min(self.grid.width // 2 - panel_w // 2, self.grid.width - panel_w))
+        vr = max(0, vr)
+        vc = max(0, vc)
+
+        def draw_panel(grid: Grid, x_offset: int, panel_cells: int) -> None:
+            for screen_r in range(min(grid_rows, grid.height)):
+                r = screen_r + vr
+                if r >= grid.height:
+                    break
+                for screen_c in range(panel_cells):
+                    c = screen_c + vc
+                    if c >= grid.width:
+                        break
+                    x = x_offset + screen_c * 2
+                    if x + 1 >= max_w:
+                        break
+                    is_alive = (r, c) in grid.cells
+                    if is_alive:
+                        if self.use_color:
+                            age = grid.ages.get((r, c), 1)
+                            attr = curses.color_pair(self._age_color_pair(age))
+                        else:
+                            attr = curses.A_BOLD
+                        ch = "██"
+                    else:
+                        attr = 0
+                        ch = "  "
+                    try:
+                        self.stdscr.addstr(screen_r, x, ch, attr)
+                    except curses.error:
+                        pass
+
+        # Draw left panel
+        left_cells = min(panel_w, (divider_x - 1) // 2)
+        draw_panel(self.split_grid_left, 0, left_cells)
+
+        # Draw divider
+        div_attr = curses.color_pair(3) if self.use_color else curses.A_DIM
+        for screen_r in range(min(grid_rows, self.grid.height)):
+            try:
+                self.stdscr.addstr(screen_r, divider_x, "│", div_attr)
+            except curses.error:
+                pass
+
+        # Draw right panel
+        right_x = divider_x + 1
+        right_cells = min(panel_w, (max_w - right_x) // 2)
+        draw_panel(self.split_grid_right, right_x, right_cells)
+
+        # Panel headers (ruleset names)
+        name_l = RULESETS[self.split_rule_left][0]
+        rs_l = rule_string(self.split_grid_left.birth, self.split_grid_left.survival)
+        name_r = RULESETS[self.split_rule_right][0]
+        rs_r = rule_string(self.split_grid_right.birth, self.split_grid_right.survival)
+        header_attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+        left_header = f" {name_l} ({rs_l}) "
+        right_header = f" {name_r} ({rs_r}) "
+        try:
+            self.stdscr.addstr(0, 1, left_header[:divider_x - 2], header_attr)
+            self.stdscr.addstr(0, right_x + 1, right_header[:max_w - right_x - 2], header_attr)
+        except curses.error:
+            pass
+
+        # Status bar with independent population counters
+        status_y = max_h - 2
+        if status_y > 0:
+            state = "RUNNING" if self.running else "PAUSED"
+            pop_l = len(self.split_grid_left.cells)
+            pop_r = len(self.split_grid_right.cells)
+            spark_l = self._split_sparkline(self.split_pop_left)
+            spark_r = self._split_sparkline(self.split_pop_right)
+            spark_l_sec = f"|{spark_l}|" if spark_l else ""
+            spark_r_sec = f"|{spark_r}|" if spark_r else ""
+            status = (
+                f" Gen: {self.split_gen} | "
+                f"L: {pop_l} {spark_l_sec} | "
+                f"R: {pop_r} {spark_r_sec} | "
+                f"Speed: {self.speed} | {state} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            help_text = (
+                f" SPLIT COMPARE: {name_l} vs {name_r} | "
+                f"[Space]Run/Pause [+/-]Speed [M]Exit split [Q]uit"
             )
             try:
                 self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
