@@ -4279,6 +4279,227 @@ class ForestFireWorld:
 
 
 # ---------------------------------------------------------------------------
+# Epidemic SIR (Susceptible-Infected-Recovered) simulation
+# ---------------------------------------------------------------------------
+
+SIR_SUSCEPTIBLE = 0
+SIR_INFECTED = 1
+SIR_RECOVERED = 2
+SIR_DEAD = 3
+
+SIR_PRESETS = {
+    "classic": {
+        "desc": "Classic SIR — moderate transmission and recovery",
+        "beta": 0.3,
+        "gamma": 0.05,
+        "mortality": 0.0,
+        "init_infected": 0.01,
+        "init_density": 1.0,
+    },
+    "highly-contagious": {
+        "desc": "Fast-spreading pathogen with high transmission",
+        "beta": 0.6,
+        "gamma": 0.03,
+        "mortality": 0.0,
+        "init_infected": 0.005,
+        "init_density": 1.0,
+    },
+    "deadly-plague": {
+        "desc": "High mortality — watch the population decline",
+        "beta": 0.4,
+        "gamma": 0.04,
+        "mortality": 0.02,
+        "init_infected": 0.005,
+        "init_density": 1.0,
+    },
+    "slow-burn": {
+        "desc": "Low transmission, slow recovery — long epidemic curve",
+        "beta": 0.15,
+        "gamma": 0.02,
+        "mortality": 0.0,
+        "init_infected": 0.02,
+        "init_density": 1.0,
+    },
+    "sparse-population": {
+        "desc": "Sparse population — natural social distancing",
+        "beta": 0.4,
+        "gamma": 0.05,
+        "mortality": 0.0,
+        "init_infected": 0.02,
+        "init_density": 0.5,
+    },
+    "pandemic": {
+        "desc": "Dense population, high mortality — worst case scenario",
+        "beta": 0.5,
+        "gamma": 0.03,
+        "mortality": 0.03,
+        "init_infected": 0.002,
+        "init_density": 1.0,
+    },
+}
+SIR_PRESET_NAMES = list(SIR_PRESETS.keys())
+
+
+class SIRWorld:
+    """Epidemic SIR (Susceptible-Infected-Recovered) grid simulation."""
+
+    def __init__(self, width: int, height: int, preset: str = "classic"):
+        self.width = width
+        self.height = height
+        self.preset_idx = SIR_PRESET_NAMES.index(preset)
+        self.beta = 0.3        # transmission probability per infected neighbor
+        self.gamma = 0.05      # recovery probability per tick
+        self.mortality = 0.0   # death probability on recovery
+        self.steps_per_tick = 1
+        # Grid: 0=susceptible, 1=infected, 2=recovered, 3=dead
+        self.grid = [[SIR_SUSCEPTIBLE] * width for _ in range(height)]
+        # Infection age (ticks since infection)
+        self.age = [[0] * width for _ in range(height)]
+        # Statistics history
+        self.s_history: list[int] = []
+        self.i_history: list[int] = []
+        self.r_history: list[int] = []
+        self.d_history: list[int] = []
+        self.max_history = 200
+        self._apply_preset(preset)
+
+    def _apply_preset(self, name: str) -> None:
+        import random as _rng
+        cfg = SIR_PRESETS[name]
+        self.beta = cfg["beta"]
+        self.gamma = cfg["gamma"]
+        self.mortality = cfg["mortality"]
+        self.grid = [[SIR_SUSCEPTIBLE] * self.width for _ in range(self.height)]
+        self.age = [[0] * self.width for _ in range(self.height)]
+        self.s_history = []
+        self.i_history = []
+        self.r_history = []
+        self.d_history = []
+        density = cfg["init_density"]
+        inf_rate = cfg["init_infected"]
+        for r in range(self.height):
+            for c in range(self.width):
+                if _rng.random() < density:
+                    if _rng.random() < inf_rate:
+                        self.grid[r][c] = SIR_INFECTED
+                        self.age[r][c] = 1
+                    else:
+                        self.grid[r][c] = SIR_SUSCEPTIBLE
+                else:
+                    # Empty cell (treated as recovered/immune for simplicity)
+                    self.grid[r][c] = SIR_RECOVERED
+
+    def cycle_preset(self, direction: int = 1) -> str:
+        self.preset_idx = (self.preset_idx + direction) % len(SIR_PRESET_NAMES)
+        name = SIR_PRESET_NAMES[self.preset_idx]
+        self._apply_preset(name)
+        return name
+
+    def reset(self) -> None:
+        self._apply_preset(SIR_PRESET_NAMES[self.preset_idx])
+
+    def infect_at(self, r: int, c: int) -> None:
+        """Manually infect a cell at (r, c)."""
+        if 0 <= r < self.height and 0 <= c < self.width:
+            if self.grid[r][c] == SIR_SUSCEPTIBLE:
+                self.grid[r][c] = SIR_INFECTED
+                self.age[r][c] = 1
+
+    def tick(self) -> None:
+        import random as _rng
+        for _ in range(self.steps_per_tick):
+            self._step(_rng)
+
+    def _step(self, _rng) -> None:
+        w, h = self.width, self.height
+        new_grid = [row[:] for row in self.grid]
+        new_age = [row[:] for row in self.age]
+
+        for r in range(h):
+            for c in range(w):
+                cell = self.grid[r][c]
+                if cell == SIR_SUSCEPTIBLE:
+                    # Count infected neighbors (von Neumann)
+                    inf_neighbors = 0
+                    if r > 0 and self.grid[r - 1][c] == SIR_INFECTED:
+                        inf_neighbors += 1
+                    if r < h - 1 and self.grid[r + 1][c] == SIR_INFECTED:
+                        inf_neighbors += 1
+                    if c > 0 and self.grid[r][c - 1] == SIR_INFECTED:
+                        inf_neighbors += 1
+                    if c < w - 1 and self.grid[r][c + 1] == SIR_INFECTED:
+                        inf_neighbors += 1
+                    # Probability of infection: 1 - (1 - beta)^inf_neighbors
+                    if inf_neighbors > 0:
+                        p_infect = 1.0 - (1.0 - self.beta) ** inf_neighbors
+                        if _rng.random() < p_infect:
+                            new_grid[r][c] = SIR_INFECTED
+                            new_age[r][c] = 1
+                elif cell == SIR_INFECTED:
+                    new_age[r][c] = self.age[r][c] + 1
+                    if _rng.random() < self.gamma:
+                        if self.mortality > 0 and _rng.random() < self.mortality:
+                            new_grid[r][c] = SIR_DEAD
+                        else:
+                            new_grid[r][c] = SIR_RECOVERED
+                        new_age[r][c] = 0
+
+        self.grid = new_grid
+        self.age = new_age
+        # Record statistics
+        s_ct, i_ct, r_ct, d_ct = self._count()
+        self.s_history.append(s_ct)
+        self.i_history.append(i_ct)
+        self.r_history.append(r_ct)
+        self.d_history.append(d_ct)
+        if len(self.s_history) > self.max_history:
+            self.s_history.pop(0)
+            self.i_history.pop(0)
+            self.r_history.pop(0)
+            self.d_history.pop(0)
+
+    def _count(self) -> tuple:
+        s = i = r = d = 0
+        for row in self.grid:
+            for v in row:
+                if v == SIR_SUSCEPTIBLE:
+                    s += 1
+                elif v == SIR_INFECTED:
+                    i += 1
+                elif v == SIR_RECOVERED:
+                    r += 1
+                elif v == SIR_DEAD:
+                    d += 1
+        return s, i, r, d
+
+    @property
+    def stats(self) -> dict:
+        s, i, r, d = self._count()
+        total = s + i + r + d
+        return {
+            "susceptible": s,
+            "infected": i,
+            "recovered": r,
+            "dead": d,
+            "total": total,
+            "s_pct": s / max(total, 1),
+            "i_pct": i / max(total, 1),
+            "r_pct": r / max(total, 1),
+        }
+
+    def sparkline(self, width: int = 30) -> str:
+        """Return a unicode sparkline of recent infected counts."""
+        if not self.i_history:
+            return ""
+        data = self.i_history[-width:]
+        mx = max(data) if data else 1
+        if mx == 0:
+            mx = 1
+        bars = "▁▂▃▄▅▆▇█"
+        return "".join(bars[min(int(v / mx * (len(bars) - 1)), len(bars) - 1)] for v in data)
+
+
+# ---------------------------------------------------------------------------
 # Abelian Sandpile simulation
 # ---------------------------------------------------------------------------
 
@@ -5086,6 +5307,11 @@ class App:
         self.dla_world: DLAWorld | None = None
         self.dla_gen = 0
         self.dla_preset_idx = 0
+        # Epidemic SIR mode
+        self.sir_mode = False
+        self.sir_world: SIRWorld | None = None
+        self.sir_gen = 0
+        self.sir_preset_idx = 0
         # Mode picker menu state
         self.menu_mode = False
         self.menu_cursor = 0        # flat index into visible items
@@ -5114,6 +5340,7 @@ class App:
             ("Biology", "Physarum Slime (S)", "Slime mold agent-based network formation", "_start_physarum"),
             ("Biology", "Boids Flocking (B)", "Reynolds flocking with separation/alignment/cohesion", "_start_boids"),
             ("Biology", "Forest Fire (F)", "Stochastic forest fire cellular automaton", "_start_forestfire"),
+            ("Biology", "Epidemic SIR (H)", "Disease spread with susceptible/infected/recovered agents", "_start_sir"),
             # --- Procedural ---
             ("Procedural", "Wave Function Collapse (T)", "Constraint-based procedural terrain generation", "_start_wfc"),
             ("Procedural", "Turmites (U)", "2D Turing machines on a grid", "_start_turmite"),
@@ -5203,6 +5430,9 @@ class App:
             elif self.dla_mode:
                 if self.running:
                     self._dla_tick()
+            elif self.sir_mode:
+                if self.running:
+                    self._sir_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -5375,6 +5605,13 @@ class App:
             curses.init_pair(153, curses.COLOR_MAGENTA, -1)  # DLA: crystal old
             curses.init_pair(154, curses.COLOR_YELLOW, -1)   # DLA: walker
             curses.init_pair(155, curses.COLOR_GREEN, -1)    # DLA: crystal tip
+            # SIR epidemic mode color pairs
+            curses.init_pair(160, curses.COLOR_GREEN, -1)    # SIR: susceptible
+            curses.init_pair(161, curses.COLOR_RED, -1)      # SIR: infected (early)
+            curses.init_pair(162, curses.COLOR_YELLOW, -1)   # SIR: infected (mid)
+            curses.init_pair(163, curses.COLOR_BLUE, -1)     # SIR: recovered
+            curses.init_pair(164, curses.COLOR_WHITE, -1)    # SIR: dead
+            curses.init_pair(165, curses.COLOR_MAGENTA, -1)  # SIR: infected (late)
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -5501,6 +5738,10 @@ class App:
         # DLA mode has its own input handler
         if self.dla_mode:
             return self._handle_dla_input(key)
+
+        # Epidemic SIR mode has its own input handler
+        if self.sir_mode:
+            return self._handle_sir_input(key)
 
         # Split mode has limited input
         if self.split_mode:
@@ -5749,6 +5990,10 @@ class App:
         # DLA (Diffusion-Limited Aggregation) simulation mode
         elif key == ord("L"):
             self._start_dla()
+
+        # Epidemic SIR simulation mode
+        elif key == ord("H"):
+            self._start_sir()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -9905,6 +10150,226 @@ class App:
             except curses.error:
                 pass
 
+    # --- Epidemic SIR (Susceptible-Infected-Recovered) mode ---
+
+    def _handle_sir_input(self, key: int) -> bool:
+        """Handle input while in Epidemic SIR mode."""
+        if key == ord("q"):
+            return False
+        elif key == ord(" "):
+            self.running = not self.running
+        elif key == ord("s"):
+            self._sir_tick()
+        elif key == ord("r"):
+            if self.sir_world:
+                self.sir_world.reset()
+                self.sir_gen = 0
+                self._set_message("SIR simulation reset")
+        elif key == ord("p"):
+            if self.sir_world:
+                name = self.sir_world.cycle_preset(-1)
+                self.sir_preset_idx = self.sir_world.preset_idx
+                self.sir_gen = 0
+                self._set_message(f"Preset: {name}")
+        elif key == ord("n"):
+            if self.sir_world:
+                name = self.sir_world.cycle_preset(1)
+                self.sir_preset_idx = self.sir_world.preset_idx
+                self.sir_gen = 0
+                self._set_message(f"Preset: {name}")
+        elif key == ord("f"):
+            if self.sir_world:
+                self.sir_world.steps_per_tick = min(
+                    20, self.sir_world.steps_per_tick + 1
+                )
+                self._set_message(f"Steps/tick: {self.sir_world.steps_per_tick}")
+        elif key == ord("d"):
+            if self.sir_world:
+                self.sir_world.steps_per_tick = max(
+                    1, self.sir_world.steps_per_tick - 1
+                )
+                self._set_message(f"Steps/tick: {self.sir_world.steps_per_tick}")
+        elif key == ord("b"):
+            # Increase transmission rate (beta)
+            if self.sir_world:
+                self.sir_world.beta = min(1.0, self.sir_world.beta + 0.02)
+                self._set_message(f"Beta (transmission): {self.sir_world.beta:.3f}")
+        elif key == ord("B"):
+            # Decrease transmission rate
+            if self.sir_world:
+                self.sir_world.beta = max(0.0, self.sir_world.beta - 0.02)
+                self._set_message(f"Beta (transmission): {self.sir_world.beta:.3f}")
+        elif key == ord("g"):
+            # Increase recovery rate (gamma)
+            if self.sir_world:
+                self.sir_world.gamma = min(1.0, self.sir_world.gamma + 0.01)
+                self._set_message(f"Gamma (recovery): {self.sir_world.gamma:.3f}")
+        elif key == ord("G"):
+            # Decrease recovery rate
+            if self.sir_world:
+                self.sir_world.gamma = max(0.0, self.sir_world.gamma - 0.01)
+                self._set_message(f"Gamma (recovery): {self.sir_world.gamma:.3f}")
+        elif key == ord("m"):
+            # Increase mortality
+            if self.sir_world:
+                self.sir_world.mortality = min(1.0, self.sir_world.mortality + 0.005)
+                self._set_message(f"Mortality: {self.sir_world.mortality:.3f}")
+        elif key == ord("M"):
+            # Decrease mortality
+            if self.sir_world:
+                self.sir_world.mortality = max(0.0, self.sir_world.mortality - 0.005)
+                self._set_message(f"Mortality: {self.sir_world.mortality:.3f}")
+        elif key == ord("H") or key == 27:  # Shift+H or ESC to exit
+            self._stop_sir()
+        elif key == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, bstate = curses.getmouse()
+                if self.sir_world and bstate & curses.BUTTON1_CLICKED:
+                    gc = mx // 2
+                    gr = my
+                    self.sir_world.infect_at(gr, gc)
+            except curses.error:
+                pass
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_sir(self) -> None:
+        """Enter Epidemic SIR simulation mode."""
+        self.running = False
+        self.sir_mode = True
+        self.sir_gen = 0
+        max_h, max_w = self.stdscr.getmaxyx()
+        w = max(4, max_w // 2)
+        h = max(4, max_h - 3)
+        preset = SIR_PRESET_NAMES[self.sir_preset_idx]
+        self.sir_world = SIRWorld(w, h, preset=preset)
+        try:
+            curses.mousemask(curses.BUTTON1_CLICKED)
+        except curses.error:
+            pass
+        self._set_message(
+            "Epidemic SIR — [Space]Run [P/N]Preset [Click]Infect [Shift+H]Exit"
+        )
+
+    def _stop_sir(self) -> None:
+        """Exit Epidemic SIR simulation mode."""
+        self.sir_mode = False
+        self.running = False
+        self.sir_world = None
+        self.sir_gen = 0
+        self._set_message("Epidemic SIR mode ended")
+
+    def _sir_tick(self) -> None:
+        """Advance one SIR simulation step."""
+        if self.sir_world:
+            self.sir_world.tick()
+            self.sir_gen += 1
+
+    def _draw_sir(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the Epidemic SIR simulation."""
+        if not self.sir_world:
+            return
+        sw = self.sir_world
+
+        draw_h = min(grid_rows, sw.height)
+        draw_w = min(grid_cols, sw.width)
+
+        for r in range(draw_h):
+            row = sw.grid[r]
+            age_row = sw.age[r]
+            for c in range(draw_w):
+                sc = c * 2
+                if sc + 1 >= max_w:
+                    break
+
+                cell = row[c]
+                if cell == SIR_SUSCEPTIBLE:
+                    ch = "██"
+                    if self.use_color:
+                        attr = curses.color_pair(160)
+                    else:
+                        attr = curses.A_NORMAL
+                elif cell == SIR_INFECTED:
+                    age = age_row[c]
+                    if age <= 3:
+                        ch = "▓▓"
+                        if self.use_color:
+                            attr = curses.color_pair(162) | curses.A_BOLD  # yellow early
+                        else:
+                            attr = curses.A_BOLD | curses.A_REVERSE
+                    elif age <= 8:
+                        ch = "██"
+                        if self.use_color:
+                            attr = curses.color_pair(161) | curses.A_BOLD  # red
+                        else:
+                            attr = curses.A_BOLD | curses.A_REVERSE
+                    else:
+                        ch = "░░"
+                        if self.use_color:
+                            attr = curses.color_pair(165)  # magenta late
+                        else:
+                            attr = curses.A_BOLD
+                elif cell == SIR_RECOVERED:
+                    ch = "░░"
+                    if self.use_color:
+                        attr = curses.color_pair(163)
+                    else:
+                        attr = curses.A_DIM
+                elif cell == SIR_DEAD:
+                    ch = "··"
+                    if self.use_color:
+                        attr = curses.color_pair(164) | curses.A_DIM
+                    else:
+                        attr = curses.A_DIM
+                else:
+                    continue
+
+                try:
+                    self.stdscr.addstr(r, sc, ch, attr)
+                except curses.error:
+                    pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            preset_name = SIR_PRESET_NAMES[sw.preset_idx]
+            state_str = "RUNNING" if self.running else "PAUSED"
+            st = sw.stats
+            sparkline = sw.sparkline(min(30, max(5, max_w // 6)))
+            status = (
+                f" SIR Epidemic | Gen: {self.sir_gen} | "
+                f"S: {st['susceptible']} ({st['s_pct']:.1%}) | "
+                f"I: {st['infected']} ({st['i_pct']:.1%}) | "
+                f"R: {st['recovered']} ({st['r_pct']:.1%}) | "
+                f"D: {st['dead']} | "
+                f"β={sw.beta:.2f} γ={sw.gamma:.2f} μ={sw.mortality:.3f} | "
+                f"{sparkline} | "
+                f"{preset_name} | {state_str} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            help_text = (
+                " [Space]Run [S]tep [R]eset | "
+                "[P/N]Preset [F]aster [D]slower | "
+                "[b/B]Beta± [g/G]Gamma± [m/M]Mortality± | "
+                "[Click]Infect | [Shift+H]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -10268,6 +10733,8 @@ class App:
             self._draw_forestfire(max_h, max_w, grid_rows, grid_cols)
         elif self.dla_mode:
             self._draw_dla(max_h, max_w, grid_rows, grid_cols)
+        elif self.sir_mode:
+            self._draw_sir(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
