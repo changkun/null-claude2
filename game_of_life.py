@@ -536,6 +536,9 @@ class App:
         self.brush_size = 1       # radius: 1 → 1x1, 2 → 3x3, 3 → 5x5, etc.
         self.brush_shape = "square"  # "square", "diamond", "circle"
         self.BRUSH_SHAPES = ["square", "diamond", "circle"]
+        # Heatmap mode state
+        self.heatmap_mode = False
+        self.heatmap: Counter[tuple[int, int]] = Counter()  # cumulative alive ticks per cell
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -555,6 +558,9 @@ class App:
             if self.running and self.history_pos == -1:
                 self._record_history()
                 self._record_population()
+                # Accumulate heatmap before tick (count current alive cells)
+                if self.heatmap_mode:
+                    self.heatmap.update(self.grid.cells)
                 self.grid.tick()
                 self.generation += 1
             self._update_viewport()
@@ -584,6 +590,12 @@ class App:
             curses.init_pair(9, curses.COLOR_WHITE, curses.COLOR_MAGENTA)  # oscillator
             curses.init_pair(10, curses.COLOR_WHITE, curses.COLOR_RED)     # spaceship
             curses.init_pair(11, curses.COLOR_CYAN, -1)                   # dashboard text
+            # Heatmap gradient: cool → hot (blue, cyan, green, yellow, red)
+            curses.init_pair(12, curses.COLOR_BLUE, -1)    # cold (rarely active)
+            curses.init_pair(13, curses.COLOR_CYAN, -1)    # cool
+            curses.init_pair(14, curses.COLOR_GREEN, -1)   # warm
+            curses.init_pair(15, curses.COLOR_YELLOW, -1)  # hot
+            curses.init_pair(16, curses.COLOR_RED, -1)     # hottest (frequently active)
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -595,6 +607,25 @@ class App:
             return 6   # yellow — mature
         else:
             return 7   # red — ancient
+
+    def _heatmap_color_pair(self, count: int, max_count: int) -> tuple[int, int]:
+        """Return (color_pair, attr) for heatmap intensity.
+
+        Maps count to a 5-tier gradient from cold (blue) to hot (red).
+        """
+        if max_count <= 0:
+            return 12, 0
+        ratio = count / max_count
+        if ratio < 0.2:
+            return 12, curses.A_DIM      # blue, dim
+        elif ratio < 0.4:
+            return 13, 0                  # cyan
+        elif ratio < 0.6:
+            return 14, 0                  # green
+        elif ratio < 0.8:
+            return 15, 0                  # yellow
+        else:
+            return 16, curses.A_BOLD      # red, bold
 
     # --- input ---
 
@@ -640,6 +671,8 @@ class App:
             if not self.running and self.history_pos == -1:
                 self._record_history()
                 self._record_population()
+                if self.heatmap_mode:
+                    self.heatmap.update(self.grid.cells)
                 self.grid.tick()
                 self.generation += 1
 
@@ -650,6 +683,7 @@ class App:
             self.history.clear()
             self.history_pos = -1
             self.pop_history.clear()
+            self.heatmap.clear()
             self._set_message("Randomized")
 
         # Clear
@@ -659,6 +693,7 @@ class App:
             self.history.clear()
             self.history_pos = -1
             self.pop_history.clear()
+            self.heatmap.clear()
             self._set_message("Cleared")
 
         # Place cell or pattern (or brush stamp)
@@ -759,6 +794,14 @@ class App:
             idx = self.BRUSH_SHAPES.index(self.brush_shape)
             self.brush_shape = self.BRUSH_SHAPES[(idx + 1) % len(self.BRUSH_SHAPES)]
             self._set_message(f"Brush shape: {self.brush_shape}")
+
+        # Heatmap mode toggle
+        elif key == ord("H"):
+            self.heatmap_mode = not self.heatmap_mode
+            if self.heatmap_mode:
+                self._set_message("Heatmap ON — tracking cell activity")
+            else:
+                self._set_message("Heatmap OFF")
 
         # Brush size with [z/Z] keys: z shrink, Z grow (shift+z)
         elif key == ord("z"):
@@ -1068,6 +1111,9 @@ class App:
                 if 0 <= br < self.grid.height and 0 <= bc < self.grid.width:
                     ghost.add((br, bc))
 
+        # Precompute heatmap max for normalization
+        heatmap_max = max(self.heatmap.values()) if (self.heatmap_mode and self.heatmap) else 0
+
         # Draw grid
         for screen_r in range(min(grid_rows, self.grid.height)):
             r = screen_r + self.view_r
@@ -1084,12 +1130,18 @@ class App:
                 is_alive = (r, c) in self.grid.cells
                 is_cursor = (r == self.cursor_r and c == self.cursor_c)
                 is_ghost = (r, c) in ghost
+                heat = self.heatmap.get((r, c), 0) if self.heatmap_mode else 0
 
                 if is_cursor:
                     attr = curses.A_REVERSE
                     if self.use_color:
                         attr |= curses.color_pair(2)
                     ch = "██" if is_alive else "▒▒"
+                elif self.heatmap_mode and heat > 0 and self.use_color:
+                    # Heatmap rendering — show heat gradient for any cell that was ever alive
+                    pair, extra = self._heatmap_color_pair(heat, heatmap_max)
+                    attr = curses.color_pair(pair) | extra
+                    ch = "██" if is_alive else "░░"
                 elif is_alive:
                     if self.dashboard and self.use_color and (r, c) in self.detected_highlights:
                         # Highlight with category color
@@ -1132,9 +1184,10 @@ class App:
             rs = rule_string(self.grid.birth, self.grid.survival)
             rule_info = f"{rule_name} {rs}"
             brush_section = f" | Brush: {self._brush_label()}" if self.brush_active else ""
+            heat_section = f" | HEATMAP({len(self.heatmap)} cells)" if self.heatmap_mode else ""
             status = (
                 f" Gen: {self.generation} | Cells: {len(self.grid.cells)}{spark_section} | "
-                f"Rule: {rule_info} | Speed: {self.speed} | {topo} | {hist_info} | {state}{brush_section} "
+                f"Rule: {rule_info} | Speed: {self.speed} | {topo} | {hist_info} | {state}{brush_section}{heat_section} "
             )
             if self.message_ttl > 0:
                 status += f"| {self.message} "
@@ -1157,7 +1210,7 @@ class App:
                 f" [Space]Run [S]tep [R]and [C]lear [Q]uit | "
                 f"[P/N]Pat: {pat_name}{custom_tag} [Enter]Place [Esc]Desel |"
                 f"{brush_info} | "
-                f"[F/G]Rule [D]ash [B]lue [X]Del [L]RLE [+/-]Spd [T]orus [</>]Rew [W]Save [O]Load"
+                f"[F/G]Rule [D]ash [H]eat [B]lue [X]Del [L]RLE [+/-]Spd [T]orus [</>]Rew [W]Save [O]Load"
             )
             try:
                 self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
