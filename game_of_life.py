@@ -2828,6 +2828,194 @@ def cell_val_in_adj(adjacency: dict, tile: int, cell) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Langton's Turmites — generalized 2D Turing machines on a grid
+# ---------------------------------------------------------------------------
+# A turmite is defined by a transition table:
+#   (state, color) -> (new_color, turn, new_state)
+# where turn is: 0=none, 1=right, 2=u-turn, 3=left (or -1=left for convenience)
+# Directions: 0=up, 1=right, 2=down, 3=left
+
+TURMITE_PRESETS: dict[str, tuple[list[list[tuple[int, int, int]]], int, str]] = {
+    # table[state][color] = (new_color, turn, new_state)
+    # turn: 0=none, 1=right, 2=u-turn, 3=left
+    "langton-ant": (
+        [[(1, 1, 0), (0, 3, 0)]],  # 1 state, 2 colors: classic RL
+        2, "Classic Langton's Ant — builds highway after ~10k steps",
+    ),
+    "fibonacci": (
+        [[(1, 1, 1), (1, 3, 0)],
+         [(1, 1, 0), (0, 0, 0)]],  # 2 states, 2 colors
+        2, "Fibonacci spiral — grows a spiral pattern",
+    ),
+    "square-builder": (
+        [[(1, 1, 1), (0, 0, 0)],
+         [(1, 0, 1), (0, 0, 0)]],
+        2, "Draws nested square patterns",
+    ),
+    "highway": (
+        [[(1, 1, 1), (1, 3, 0)],
+         [(1, 3, 0), (0, 1, 1)]],
+        2, "Fast highway builder — diagonal roads",
+    ),
+    "chaotic": (
+        [[(1, 1, 1), (0, 3, 1)],
+         [(0, 1, 0), (0, 3, 0)]],
+        2, "Chaotic wanderer — never settles",
+    ),
+    "snowflake": (
+        [[(1, 1, 1), (1, 3, 1)],
+         [(0, 3, 0), (0, 1, 0)]],
+        2, "Grows symmetric snowflake-like structure",
+    ),
+    "striped": (
+        [[(1, 3, 0), (1, 1, 1)],
+         [(0, 1, 0), (1, 3, 0)]],
+        2, "Produces striped highway patterns",
+    ),
+    "spiral-4c": (
+        [[(1, 1, 0), (2, 3, 0), (3, 1, 0), (0, 3, 0)]],  # 1 state, 4 colors
+        4, "4-color spiral — rich symmetric growth",
+    ),
+    "counter": (
+        [[(1, 1, 1), (0, 3, 0)],
+         [(0, 3, 1), (1, 1, 0)]],
+        2, "Binary counter — orderly rectangular growth",
+    ),
+    "worm": (
+        [[(1, 1, 0), (0, 1, 1)],
+         [(1, 0, 0), (0, 0, 1)]],
+        2, "Worm-like straight-line explorer",
+    ),
+}
+TURMITE_PRESET_NAMES = list(TURMITE_PRESETS.keys())
+
+# Direction deltas: UP, RIGHT, DOWN, LEFT
+TURMITE_DELTAS = [(-1, 0), (0, 1), (1, 0), (0, -1)]
+
+# Characters for turmite head by direction
+TURMITE_HEAD_CHARS = ["▲▲", "►►", "▼▼", "◄◄"]
+
+# Color characters for different cell states
+TURMITE_CELL_CHARS = [
+    "  ",   # color 0 (empty)
+    "██",   # color 1
+    "▓▓",   # color 2
+    "░░",   # color 3
+]
+
+
+class TurmiteWorld:
+    """2D Turing Machine (Turmite) simulation.
+
+    Each turmite has an internal state and sits on a colored grid cell.
+    The transition table maps (state, color) to (new_color, turn, new_state).
+    Multiple turmites can run simultaneously on the same grid.
+    """
+
+    def __init__(self, width: int, height: int, preset: str = "langton-ant"):
+        self.width = width
+        self.height = height
+        self.preset_idx = TURMITE_PRESET_NAMES.index(preset)
+
+        # Grid of colors (integers)
+        self.grid: list[list[int]] = [
+            [0] * width for _ in range(height)
+        ]
+
+        # Turmite agents: list of [row, col, direction, state]
+        self.turmites: list[list[int]] = []
+
+        # Steps per tick
+        self.steps_per_tick = 1
+
+        # Apply preset (sets transition table and num_colors)
+        self._apply_preset(preset)
+
+        # Place initial turmite at center
+        self._add_turmite(height // 2, width // 2)
+
+    def _apply_preset(self, name: str) -> None:
+        table, num_colors, _desc = TURMITE_PRESETS[name]
+        self.table = table  # table[state][color] = (new_color, turn, new_state)
+        self.num_colors = num_colors
+        self.num_states = len(table)
+
+    def cycle_preset(self, direction: int = 1) -> str:
+        self.preset_idx = (self.preset_idx + direction) % len(TURMITE_PRESET_NAMES)
+        name = TURMITE_PRESET_NAMES[self.preset_idx]
+        self._apply_preset(name)
+        self.reset()
+        return name
+
+    def _add_turmite(self, r: int, c: int, direction: int = 0, state: int = 0) -> None:
+        self.turmites.append([r, c, direction, state])
+
+    def add_turmite_center(self) -> None:
+        """Add a new turmite at a random position near center."""
+        r = self.height // 2 + random.randint(-self.height // 4, self.height // 4)
+        c = self.width // 2 + random.randint(-self.width // 4, self.width // 4)
+        d = random.randint(0, 3)
+        self._add_turmite(r, c, d)
+
+    def remove_turmite(self) -> None:
+        """Remove the last turmite (keep at least one)."""
+        if len(self.turmites) > 1:
+            self.turmites.pop()
+
+    def reset(self) -> None:
+        """Clear grid and reset to single centered turmite."""
+        for y in range(self.height):
+            for x in range(self.width):
+                self.grid[y][x] = 0
+        self.turmites = []
+        self._add_turmite(self.height // 2, self.width // 2)
+
+    def tick(self) -> None:
+        """Advance simulation by steps_per_tick steps."""
+        table = self.table
+        grid = self.grid
+        w, h = self.width, self.height
+        nc = self.num_colors
+
+        for _ in range(self.steps_per_tick):
+            for t in self.turmites:
+                r, c, d, s = t
+                color = grid[r][c]
+                # Clamp color to valid range for this table
+                if color >= len(table[s]):
+                    color = color % len(table[s])
+
+                new_color, turn, new_state = table[s][color]
+
+                # Write new color
+                grid[r][c] = new_color % nc
+
+                # Turn: 0=none, 1=right, 2=u-turn, 3=left
+                d = (d + turn) % 4
+
+                # Move forward
+                dr, dc = TURMITE_DELTAS[d]
+                r = (r + dr) % h
+                c = (c + dc) % w
+
+                # Update turmite
+                t[0] = r
+                t[1] = c
+                t[2] = d
+                t[3] = new_state
+
+    @property
+    def colored_cells(self) -> int:
+        """Count non-zero cells."""
+        count = 0
+        for row in self.grid:
+            for c in row:
+                if c != 0:
+                    count += 1
+        return count
+
+
+# ---------------------------------------------------------------------------
 # Pattern detector — identifies known still lifes, oscillators, spaceships
 # ---------------------------------------------------------------------------
 
@@ -3399,6 +3587,11 @@ class App:
         self.wfc_world: WFCWorld | None = None
         self.wfc_gen = 0
         self.wfc_preset_idx = 0
+        # Langton's Turmites mode
+        self.turmite_mode = False
+        self.turmite_world: TurmiteWorld | None = None
+        self.turmite_gen = 0
+        self.turmite_preset_idx = 0
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -3454,6 +3647,9 @@ class App:
             elif self.wfc_mode:
                 if self.running:
                     self._wfc_tick()
+            elif self.turmite_mode:
+                if self.running:
+                    self._turmite_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -3574,6 +3770,13 @@ class App:
             curses.init_pair(84, curses.COLOR_RED, -1)     # WFC: mountain
             curses.init_pair(85, curses.COLOR_WHITE, -1)   # WFC: snow
             curses.init_pair(86, curses.COLOR_CYAN, -1)    # WFC: uncollapsed
+            # Turmite colors
+            curses.init_pair(90, curses.COLOR_WHITE, -1)   # Turmite: color 1
+            curses.init_pair(91, curses.COLOR_CYAN, -1)    # Turmite: color 2
+            curses.init_pair(92, curses.COLOR_BLUE, -1)    # Turmite: color 3
+            curses.init_pair(93, curses.COLOR_RED, -1)     # Turmite: head
+            curses.init_pair(94, curses.COLOR_YELLOW, -1)  # Turmite: head alt
+            curses.init_pair(95, curses.COLOR_GREEN, -1)   # Turmite: trail highlight
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -3668,6 +3871,10 @@ class App:
         # Wave Function Collapse mode has its own input handler
         if self.wfc_mode:
             return self._handle_wfc_input(key)
+
+        # Turmite mode has its own input handler
+        if self.turmite_mode:
+            return self._handle_turmite_input(key)
 
         # Split mode has limited input
         if self.split_mode:
@@ -3888,6 +4095,10 @@ class App:
         # Wave Function Collapse terrain generation mode
         elif key == ord("T"):
             self._start_wfc()
+
+        # Langton's Turmites mode
+        elif key == ord("U"):
+            self._start_turmite()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -6534,6 +6745,165 @@ class App:
             except curses.error:
                 pass
 
+    # --- Langton's Turmites simulation ---
+
+    def _handle_turmite_input(self, key: int) -> bool:
+        """Handle input while in Turmite mode."""
+        if key == ord("q"):
+            return False
+        elif key == ord(" "):
+            self.running = not self.running
+        elif key == ord("s"):
+            if not self.running:
+                self._turmite_tick()
+        elif key == ord("r"):
+            if self.turmite_world:
+                self.turmite_world.reset()
+                self.turmite_gen = 0
+                self._set_message("Reset")
+        # Cycle preset forward/back
+        elif key == ord("p") or key == ord("n"):
+            if self.turmite_world:
+                direction = 1 if key == ord("n") else -1
+                name = self.turmite_world.cycle_preset(direction)
+                self.turmite_preset_idx = self.turmite_world.preset_idx
+                self.turmite_gen = 0
+                self._set_message(f"Preset: {name}")
+        # Steps per tick
+        elif key == ord("]"):
+            if self.turmite_world:
+                self.turmite_world.steps_per_tick = min(500, self.turmite_world.steps_per_tick * 2)
+                self._set_message(f"Steps/tick: {self.turmite_world.steps_per_tick}")
+        elif key == ord("["):
+            if self.turmite_world:
+                self.turmite_world.steps_per_tick = max(1, self.turmite_world.steps_per_tick // 2)
+                self._set_message(f"Steps/tick: {self.turmite_world.steps_per_tick}")
+        # Add/remove turmites
+        elif key == ord("+") or key == ord("="):
+            if self.turmite_world:
+                self.turmite_world.add_turmite_center()
+                self._set_message(f"Turmites: {len(self.turmite_world.turmites)}")
+        elif key == ord("-") or key == ord("_"):
+            if self.turmite_world:
+                self.turmite_world.remove_turmite()
+                self._set_message(f"Turmites: {len(self.turmite_world.turmites)}")
+        # Speed control
+        elif key == ord("f"):
+            self.speed = min(20, self.speed + 1)
+            self._update_timeout()
+        elif key == ord("d"):
+            self.speed = max(1, self.speed - 1)
+            self._update_timeout()
+        # Exit Turmite mode
+        elif key == ord("U") or key == 27:
+            self._stop_turmite()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_turmite(self) -> None:
+        """Enter Turmite mode."""
+        self.running = False
+        self.turmite_mode = True
+        self.turmite_gen = 0
+        max_h, max_w = self.stdscr.getmaxyx()
+        w = max(4, max_w // 2)
+        h = max(4, max_h - 3)
+        preset = TURMITE_PRESET_NAMES[self.turmite_preset_idx]
+        self.turmite_world = TurmiteWorld(w, h, preset=preset)
+        self._set_message(
+            "Turmites — [Space]Run [P/N]Preset [+/-]Turmites [Shift+U]Exit"
+        )
+
+    def _stop_turmite(self) -> None:
+        """Exit Turmite mode."""
+        self.turmite_mode = False
+        self.running = False
+        self.turmite_world = None
+        self.turmite_gen = 0
+        self._set_message("Turmite mode ended")
+
+    def _turmite_tick(self) -> None:
+        """Advance one turmite step."""
+        if self.turmite_world:
+            self.turmite_world.tick()
+            self.turmite_gen += 1
+
+    def _draw_turmite(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the turmite grid with colored cells and turmite heads."""
+        if not self.turmite_world:
+            return
+        tw = self.turmite_world
+
+        # Build set of turmite positions for O(1) lookup
+        head_map: dict[tuple[int, int], int] = {}
+        for t in tw.turmites:
+            head_map[(t[0], t[1])] = t[2]  # direction
+
+        # Color pairs for cell colors
+        cell_colors = [0, 90, 91, 92]  # color 0=default, 1-3 use pairs 90-92
+
+        for r in range(min(grid_rows, tw.height)):
+            for c in range(min(grid_cols, tw.width)):
+                sc = c * 2
+                if sc + 1 >= max_w:
+                    break
+
+                if (r, c) in head_map:
+                    # Draw turmite head with direction
+                    d = head_map[(r, c)]
+                    ch = TURMITE_HEAD_CHARS[d] if d < len(TURMITE_HEAD_CHARS) else "◆◆"
+                    attr = curses.color_pair(93) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+                else:
+                    color = tw.grid[r][c]
+                    if color == 0:
+                        continue  # skip empty cells for performance
+                    ci = min(color, len(TURMITE_CELL_CHARS) - 1)
+                    ch = TURMITE_CELL_CHARS[ci]
+                    cp = cell_colors[min(color, len(cell_colors) - 1)]
+                    attr = curses.color_pair(cp) if self.use_color else curses.A_BOLD
+
+                try:
+                    self.stdscr.addstr(r, sc, ch, attr)
+                except curses.error:
+                    pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            preset_name = TURMITE_PRESET_NAMES[tw.preset_idx]
+            state_str = "RUNNING" if self.running else "PAUSED"
+            desc = TURMITE_PRESETS[preset_name][2]
+            n_turmites = len(tw.turmites)
+            total_steps = self.turmite_gen * tw.steps_per_tick
+            status = (
+                f" Turmites | Gen: {self.turmite_gen} ({total_steps} steps) | "
+                f"Agents: {n_turmites} | States: {tw.num_states} Colors: {tw.num_colors} | "
+                f"Steps/tick: {tw.steps_per_tick} | "
+                f"Preset: {preset_name} | Speed: {self.speed} | {state_str} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            help_text = (
+                " [Space]Run [S]tep [R]eset | "
+                "[P/N]Preset [+/-]Add/Rm turmite [\\[/\\]]Steps/tick | "
+                "[F]aster [D]slower | [Shift+U]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -6881,6 +7251,8 @@ class App:
             self._draw_nca(max_h, max_w, grid_rows, grid_cols)
         elif self.wfc_mode:
             self._draw_wfc(max_h, max_w, grid_rows, grid_cols)
+        elif self.turmite_mode:
+            self._draw_turmite(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
