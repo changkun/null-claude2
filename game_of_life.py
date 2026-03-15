@@ -3604,6 +3604,238 @@ class MagFieldWorld:
 
 
 # ---------------------------------------------------------------------------
+# Gravity N-Body simulation
+# ---------------------------------------------------------------------------
+
+NBODY_PRESETS = {
+    "binary-star": {
+        "desc": "Two massive stars orbiting each other",
+        "bodies": [
+            {"x_frac": 0.4, "y_frac": 0.5, "vx": 0.0, "vy": -0.4, "mass": 80.0, "kind": "star"},
+            {"x_frac": 0.6, "y_frac": 0.5, "vx": 0.0, "vy": 0.4, "mass": 80.0, "kind": "star"},
+        ],
+    },
+    "solar-system": {
+        "desc": "Central star with orbiting planets",
+        "bodies": [
+            {"x_frac": 0.5, "y_frac": 0.5, "vx": 0.0, "vy": 0.0, "mass": 200.0, "kind": "star"},
+            {"x_frac": 0.65, "y_frac": 0.5, "vx": 0.0, "vy": 1.3, "mass": 5.0, "kind": "planet"},
+            {"x_frac": 0.75, "y_frac": 0.5, "vx": 0.0, "vy": 1.0, "mass": 8.0, "kind": "planet"},
+            {"x_frac": 0.85, "y_frac": 0.5, "vx": 0.0, "vy": 0.8, "mass": 3.0, "kind": "planet"},
+            {"x_frac": 0.35, "y_frac": 0.5, "vx": 0.0, "vy": -1.3, "mass": 4.0, "kind": "planet"},
+        ],
+    },
+    "three-body": {
+        "desc": "Chaotic three-body problem",
+        "bodies": [
+            {"x_frac": 0.35, "y_frac": 0.35, "vx": 0.3, "vy": 0.0, "mass": 60.0, "kind": "star"},
+            {"x_frac": 0.65, "y_frac": 0.35, "vx": -0.15, "vy": 0.25, "mass": 60.0, "kind": "star"},
+            {"x_frac": 0.5, "y_frac": 0.7, "vx": -0.15, "vy": -0.25, "mass": 60.0, "kind": "star"},
+        ],
+    },
+    "asteroid-belt": {
+        "desc": "Star with many small orbiting bodies",
+        "bodies": "procedural-belt",
+    },
+    "figure-eight": {
+        "desc": "Three equal masses in a figure-eight orbit",
+        "bodies": [
+            {"x_frac": 0.5, "y_frac": 0.38, "vx": 0.52, "vy": 0.30, "mass": 50.0, "kind": "star"},
+            {"x_frac": 0.5, "y_frac": 0.62, "vx": 0.52, "vy": 0.30, "mass": 50.0, "kind": "star"},
+            {"x_frac": 0.5, "y_frac": 0.5, "vx": -1.04, "vy": -0.60, "mass": 50.0, "kind": "star"},
+        ],
+    },
+}
+
+NBODY_PRESET_NAMES = list(NBODY_PRESETS.keys())
+
+
+class NBodyWorld:
+    """N-body gravitational simulation.
+
+    Bodies interact via F = G*m1*m2/r^2, with collision merging
+    and orbital trail rendering.
+    """
+
+    def __init__(self, width: int, height: int, preset: str = "binary-star"):
+        self.width = width
+        self.height = height
+        self.preset_idx = NBODY_PRESET_NAMES.index(preset)
+        self.steps_per_tick = 2
+        self.dt = 0.08
+        self.G = 0.5  # gravitational constant
+        self.trail_len = 20
+        self.softening = 1.5  # softening length to prevent singularities
+        self.merge_dist = 1.0  # collision/merge distance factor
+        self.bodies: list[dict] = []
+        self._apply_preset(preset)
+
+    def _apply_preset(self, name: str) -> None:
+        p = NBODY_PRESETS[name]
+        self.bodies = []
+        w, h = self.width, self.height
+
+        if p["bodies"] == "procedural-belt":
+            # Central star + ring of small bodies
+            self.bodies.append({
+                "x": w * 0.5, "y": h * 0.5,
+                "vx": 0.0, "vy": 0.0,
+                "mass": 200.0, "kind": "star", "trail": [],
+            })
+            for i in range(30):
+                angle = random.uniform(0, 2 * math.pi)
+                r = random.uniform(min(w, h) * 0.2, min(w, h) * 0.4)
+                x = w * 0.5 + r * math.cos(angle)
+                y = h * 0.5 + r * math.sin(angle)
+                # Orbital velocity: v = sqrt(GM/r)
+                v = math.sqrt(self.G * 200.0 / max(r, 1.0))
+                vx = -v * math.sin(angle) + random.uniform(-0.05, 0.05)
+                vy = v * math.cos(angle) + random.uniform(-0.05, 0.05)
+                self.bodies.append({
+                    "x": x, "y": y, "vx": vx, "vy": vy,
+                    "mass": random.uniform(0.5, 3.0), "kind": "asteroid",
+                    "trail": [],
+                })
+        else:
+            for b in p["bodies"]:
+                self.bodies.append({
+                    "x": w * b["x_frac"], "y": h * b["y_frac"],
+                    "vx": b["vx"], "vy": b["vy"],
+                    "mass": b["mass"], "kind": b["kind"],
+                    "trail": [],
+                })
+
+    def cycle_preset(self, direction: int = 1) -> str:
+        self.preset_idx = (self.preset_idx + direction) % len(NBODY_PRESET_NAMES)
+        name = NBODY_PRESET_NAMES[self.preset_idx]
+        self._apply_preset(name)
+        return name
+
+    def reset(self) -> None:
+        name = NBODY_PRESET_NAMES[self.preset_idx]
+        self._apply_preset(name)
+
+    def tick(self) -> None:
+        for _ in range(self.steps_per_tick):
+            self._step()
+
+    def _step(self) -> None:
+        """Velocity-Verlet integration with pairwise gravity."""
+        dt = self.dt
+        bodies = self.bodies
+        n = len(bodies)
+        if n == 0:
+            return
+
+        # Compute accelerations
+        ax = [0.0] * n
+        ay = [0.0] * n
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = bodies[j]["x"] - bodies[i]["x"]
+                dy = bodies[j]["y"] - bodies[i]["y"]
+                r2 = dx * dx + dy * dy + self.softening * self.softening
+                r = math.sqrt(r2)
+                f = self.G * bodies[i]["mass"] * bodies[j]["mass"] / r2
+                fx = f * dx / r
+                fy = f * dy / r
+                ax[i] += fx / bodies[i]["mass"]
+                ay[i] += fy / bodies[i]["mass"]
+                ax[j] -= fx / bodies[j]["mass"]
+                ay[j] -= fy / bodies[j]["mass"]
+
+        # Update velocities and positions
+        for i in range(n):
+            b = bodies[i]
+            # Save trail
+            b["trail"].append((b["x"], b["y"]))
+            if len(b["trail"]) > self.trail_len:
+                b["trail"] = b["trail"][-self.trail_len:]
+
+            b["vx"] += ax[i] * dt
+            b["vy"] += ay[i] * dt
+            b["x"] += b["vx"] * dt
+            b["y"] += b["vy"] * dt
+
+        # Speed cap
+        max_speed = 5.0
+        for b in bodies:
+            speed = math.sqrt(b["vx"] ** 2 + b["vy"] ** 2)
+            if speed > max_speed:
+                b["vx"] *= max_speed / speed
+                b["vy"] *= max_speed / speed
+
+        # Collision detection & merging
+        merged: set[int] = set()
+        new_bodies: list[dict] = []
+        for i in range(n):
+            if i in merged:
+                continue
+            bi = bodies[i]
+            for j in range(i + 1, n):
+                if j in merged:
+                    continue
+                bj = bodies[j]
+                dx = bi["x"] - bj["x"]
+                dy = bi["y"] - bj["y"]
+                dist = math.sqrt(dx * dx + dy * dy)
+                # Merge threshold based on sum of "radii" (proportional to mass)
+                ri = max(0.3, bi["mass"] ** 0.33 * 0.3)
+                rj = max(0.3, bj["mass"] ** 0.33 * 0.3)
+                if dist < (ri + rj) * self.merge_dist:
+                    # Merge j into i (conserve momentum)
+                    total_m = bi["mass"] + bj["mass"]
+                    bi["vx"] = (bi["mass"] * bi["vx"] + bj["mass"] * bj["vx"]) / total_m
+                    bi["vy"] = (bi["mass"] * bi["vy"] + bj["mass"] * bj["vy"]) / total_m
+                    bi["x"] = (bi["mass"] * bi["x"] + bj["mass"] * bj["x"]) / total_m
+                    bi["y"] = (bi["mass"] * bi["y"] + bj["mass"] * bj["y"]) / total_m
+                    bi["mass"] = total_m
+                    # Promote kind if large enough
+                    if bi["mass"] >= 30.0:
+                        bi["kind"] = "star"
+                    elif bi["mass"] >= 8.0:
+                        bi["kind"] = "planet"
+                    merged.add(j)
+            new_bodies.append(bi)
+        self.bodies = new_bodies
+
+        # Soft boundary: wrap or reflect bodies that leave the arena
+        w, h = self.width, self.height
+        for b in self.bodies:
+            if b["x"] < 0:
+                b["x"] = 0.0
+                b["vx"] = abs(b["vx"]) * 0.5
+            elif b["x"] >= w:
+                b["x"] = w - 0.01
+                b["vx"] = -abs(b["vx"]) * 0.5
+            if b["y"] < 0:
+                b["y"] = 0.0
+                b["vy"] = abs(b["vy"]) * 0.5
+            elif b["y"] >= h:
+                b["y"] = h - 0.01
+                b["vy"] = -abs(b["vy"]) * 0.5
+
+    @property
+    def stats(self) -> dict:
+        if not self.bodies:
+            return {"n": 0, "stars": 0, "planets": 0, "asteroids": 0,
+                    "total_mass": 0.0, "avg_speed": 0.0}
+        stars = sum(1 for b in self.bodies if b["kind"] == "star")
+        planets = sum(1 for b in self.bodies if b["kind"] == "planet")
+        asteroids = sum(1 for b in self.bodies if b["kind"] == "asteroid")
+        total_mass = sum(b["mass"] for b in self.bodies)
+        speeds = [math.sqrt(b["vx"] ** 2 + b["vy"] ** 2) for b in self.bodies]
+        return {
+            "n": len(self.bodies),
+            "stars": stars,
+            "planets": planets,
+            "asteroids": asteroids,
+            "total_mass": total_mass,
+            "avg_speed": sum(speeds) / len(speeds),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Pattern detector — identifies known still lifes, oscillators, spaceships
 # ---------------------------------------------------------------------------
 
@@ -4190,6 +4422,11 @@ class App:
         self.magfield_world: MagFieldWorld | None = None
         self.magfield_gen = 0
         self.magfield_preset_idx = 0
+        # Gravity N-Body simulation mode
+        self.nbody_mode = False
+        self.nbody_world: NBodyWorld | None = None
+        self.nbody_gen = 0
+        self.nbody_preset_idx = 0
 
     def _refresh_patterns(self) -> None:
         """Reload merged pattern library from built-in + custom patterns."""
@@ -4254,6 +4491,9 @@ class App:
             elif self.magfield_mode:
                 if self.running:
                     self._magfield_tick()
+            elif self.nbody_mode:
+                if self.running:
+                    self._nbody_tick()
             elif self.split_mode:
                 if self.running:
                     self._split_tick()
@@ -4396,6 +4636,14 @@ class App:
             curses.init_pair(113, curses.COLOR_YELLOW, -1)   # MagField: slow positive
             curses.init_pair(114, curses.COLOR_CYAN, -1)     # MagField: fast negative
             curses.init_pair(115, curses.COLOR_BLUE, -1)     # MagField: slow negative
+            # N-Body gravity mode color pairs
+            curses.init_pair(120, curses.COLOR_YELLOW, -1)   # NBody: star
+            curses.init_pair(121, curses.COLOR_CYAN, -1)     # NBody: planet
+            curses.init_pair(122, curses.COLOR_WHITE, -1)    # NBody: asteroid
+            curses.init_pair(123, curses.COLOR_RED, -1)      # NBody: star trail
+            curses.init_pair(124, curses.COLOR_BLUE, -1)     # NBody: planet trail
+            curses.init_pair(125, curses.COLOR_GREEN, -1)    # NBody: asteroid trail
+            curses.init_pair(126, curses.COLOR_MAGENTA, -1)  # NBody: large star
 
     def _age_color_pair(self, age: int) -> int:
         """Return curses color pair number based on cell age."""
@@ -4502,6 +4750,10 @@ class App:
         # Magnetic Field mode has its own input handler
         if self.magfield_mode:
             return self._handle_magfield_input(key)
+
+        # N-Body gravity mode has its own input handler
+        if self.nbody_mode:
+            return self._handle_nbody_input(key)
 
         # Split mode has limited input
         if self.split_mode:
@@ -4734,6 +4986,10 @@ class App:
         # Magnetic Field simulation mode
         elif key == ord("G"):
             self._start_magfield()
+
+        # Gravity N-Body simulation mode
+        elif key == ord("K"):
+            self._start_nbody()
 
         # Split-screen comparison mode
         elif key == ord("m"):
@@ -8002,6 +8258,262 @@ class App:
             except curses.error:
                 pass
 
+    # --- N-Body gravity mode ---
+
+    def _handle_nbody_input(self, key: int) -> bool:
+        """Handle input while in N-Body gravity mode."""
+        if key == ord("q"):
+            return False
+        elif key == ord(" "):
+            self.running = not self.running
+        elif key == ord("s"):
+            if not self.running:
+                self._nbody_tick()
+        elif key == ord("r"):
+            if self.nbody_world:
+                self.nbody_world.reset()
+                self.nbody_gen = 0
+                self._set_message("Reset")
+        # Cycle preset forward/back
+        elif key == ord("p") or key == ord("n"):
+            if self.nbody_world:
+                direction = 1 if key == ord("n") else -1
+                name = self.nbody_world.cycle_preset(direction)
+                self.nbody_preset_idx = self.nbody_world.preset_idx
+                self.nbody_gen = 0
+                self._set_message(f"Preset: {name}")
+        # Adjust G (gravity strength)
+        elif key == ord("+") or key == ord("="):
+            if self.nbody_world:
+                self.nbody_world.G *= 1.25
+                self._set_message(f"G = {self.nbody_world.G:.3f}")
+        elif key == ord("-") or key == ord("_"):
+            if self.nbody_world:
+                self.nbody_world.G *= 0.8
+                self._set_message(f"G = {self.nbody_world.G:.3f}")
+        # Toggle trail length
+        elif key == ord("t"):
+            if self.nbody_world:
+                nw = self.nbody_world
+                nw.trail_len = (nw.trail_len + 10) % 60
+                if nw.trail_len == 0:
+                    nw.trail_len = 10
+                self._set_message(f"Trail length: {nw.trail_len}")
+        # Add a random body
+        elif key == ord("a"):
+            if self.nbody_world:
+                nw = self.nbody_world
+                x = random.uniform(nw.width * 0.1, nw.width * 0.9)
+                y = random.uniform(nw.height * 0.1, nw.height * 0.9)
+                mass = random.uniform(2.0, 15.0)
+                angle = random.uniform(0, 2 * math.pi)
+                speed = random.uniform(0.2, 0.8)
+                nw.bodies.append({
+                    "x": x, "y": y,
+                    "vx": speed * math.cos(angle),
+                    "vy": speed * math.sin(angle),
+                    "mass": mass, "kind": "planet", "trail": [],
+                })
+                self._set_message(f"Added body (n={len(nw.bodies)})")
+        # Add a massive star
+        elif key == ord("A"):
+            if self.nbody_world:
+                nw = self.nbody_world
+                nw.bodies.append({
+                    "x": nw.width / 2.0 + random.uniform(-5, 5),
+                    "y": nw.height / 2.0 + random.uniform(-5, 5),
+                    "vx": random.uniform(-0.2, 0.2),
+                    "vy": random.uniform(-0.2, 0.2),
+                    "mass": random.uniform(50.0, 120.0),
+                    "kind": "star", "trail": [],
+                })
+                self._set_message(f"Added star (n={len(nw.bodies)})")
+        # Steps per tick
+        elif key == ord("]"):
+            if self.nbody_world:
+                self.nbody_world.steps_per_tick = min(20, self.nbody_world.steps_per_tick + 1)
+                self._set_message(f"Steps/tick: {self.nbody_world.steps_per_tick}")
+        elif key == ord("["):
+            if self.nbody_world:
+                self.nbody_world.steps_per_tick = max(1, self.nbody_world.steps_per_tick - 1)
+                self._set_message(f"Steps/tick: {self.nbody_world.steps_per_tick}")
+        # Speed control
+        elif key == ord("f"):
+            self.speed = min(20, self.speed + 1)
+            self._update_timeout()
+        elif key == ord("d"):
+            self.speed = max(1, self.speed - 1)
+            self._update_timeout()
+        # Exit N-Body mode
+        elif key == ord("K") or key == 27:
+            self._stop_nbody()
+        elif key == curses.KEY_RESIZE:
+            pass
+        return True
+
+    def _start_nbody(self) -> None:
+        """Enter N-Body gravity simulation mode."""
+        self.running = False
+        self.nbody_mode = True
+        self.nbody_gen = 0
+        max_h, max_w = self.stdscr.getmaxyx()
+        w = max(4, max_w // 2)
+        h = max(4, max_h - 3)
+        preset = NBODY_PRESET_NAMES[self.nbody_preset_idx]
+        self.nbody_world = NBodyWorld(w, h, preset=preset)
+        self._set_message(
+            "N-Body — [Space]Run [P/N]Preset [+/-]Gravity [Shift+K]Exit"
+        )
+
+    def _stop_nbody(self) -> None:
+        """Exit N-Body gravity simulation mode."""
+        self.nbody_mode = False
+        self.running = False
+        self.nbody_world = None
+        self.nbody_gen = 0
+        self._set_message("N-Body mode ended")
+
+    def _nbody_tick(self) -> None:
+        """Advance one N-body simulation step."""
+        if self.nbody_world:
+            self.nbody_world.tick()
+            self.nbody_gen += 1
+
+    def _draw_nbody(self, max_h: int, max_w: int, grid_rows: int, grid_cols: int) -> None:
+        """Draw the N-body gravitational simulation."""
+        if not self.nbody_world:
+            return
+        nw = self.nbody_world
+
+        draw_w = min(grid_cols, nw.width)
+        draw_h = min(grid_rows, nw.height)
+
+        # Collect trail positions
+        trail_grid: dict[tuple[int, int], tuple[str, float]] = {}  # (r,c) -> (kind, age_fraction)
+        body_grid: dict[tuple[int, int], dict] = {}  # (r,c) -> body
+
+        for b in nw.bodies:
+            trail = b["trail"]
+            for ti, (tx, ty) in enumerate(trail):
+                tr = int(ty)
+                tc = int(tx)
+                if 0 <= tr < draw_h and 0 <= tc < draw_w:
+                    age = (ti + 1) / max(len(trail), 1)
+                    trail_grid[(tr, tc)] = (b["kind"], age)
+
+            br = int(b["y"])
+            bc = int(b["x"])
+            if 0 <= br < draw_h and 0 <= bc < draw_w:
+                body_grid[(br, bc)] = b
+
+        # Render trails
+        for (r, c), (kind, age) in trail_grid.items():
+            if (r, c) in body_grid:
+                continue
+            sc = c * 2
+            if sc + 1 >= max_w:
+                continue
+
+            trail_chars = ["··", "∙∙", "░░", "▒▒"]
+            ci = min(int(age * len(trail_chars)), len(trail_chars) - 1)
+            ch = trail_chars[ci]
+
+            if self.use_color:
+                if kind == "star":
+                    cp = curses.color_pair(123)
+                elif kind == "planet":
+                    cp = curses.color_pair(124)
+                else:
+                    cp = curses.color_pair(125)
+                attr = cp | curses.A_DIM
+            else:
+                attr = curses.A_DIM
+
+            try:
+                self.stdscr.addstr(r, sc, ch, attr)
+            except curses.error:
+                pass
+
+        # Render bodies
+        for (r, c), b in body_grid.items():
+            sc = c * 2
+            if sc + 1 >= max_w:
+                continue
+
+            mass = b["mass"]
+            kind = b["kind"]
+
+            # Body character based on kind and mass
+            if kind == "star":
+                if mass >= 100:
+                    ch = "★★"
+                elif mass >= 40:
+                    ch = "✦✦"
+                else:
+                    ch = "✶✶"
+            elif kind == "planet":
+                if mass >= 10:
+                    ch = "●●"
+                else:
+                    ch = "○○"
+            else:  # asteroid
+                ch = "∘∘"
+
+            if self.use_color:
+                if kind == "star":
+                    if mass >= 80:
+                        cp = curses.color_pair(126)  # magenta for massive stars
+                    else:
+                        cp = curses.color_pair(120)  # yellow for stars
+                elif kind == "planet":
+                    cp = curses.color_pair(121)  # cyan for planets
+                else:
+                    cp = curses.color_pair(122)  # white for asteroids
+                attr = cp | curses.A_BOLD
+            else:
+                attr = curses.A_BOLD if kind == "star" else curses.A_NORMAL
+
+            try:
+                self.stdscr.addstr(r, sc, ch, attr)
+            except curses.error:
+                pass
+
+        # Status bar
+        status_y = max_h - 2
+        if status_y > 0:
+            preset_name = NBODY_PRESET_NAMES[nw.preset_idx]
+            state_str = "RUNNING" if self.running else "PAUSED"
+            st = nw.stats
+            total_steps = self.nbody_gen * nw.steps_per_tick
+            status = (
+                f" N-Body | Gen: {self.nbody_gen} ({total_steps} steps) | "
+                f"Bodies: {st['n']} (★{st['stars']} ●{st['planets']} ∘{st['asteroids']}) | "
+                f"Mass: {st['total_mass']:.0f} | G: {nw.G:.3f} | "
+                f"Preset: {preset_name} | Speed: {self.speed} | {state_str} "
+            )
+            if self.message_ttl > 0:
+                status += f"| {self.message} "
+                self.message_ttl -= 1
+            attr = curses.color_pair(3) | curses.A_BOLD if self.use_color else curses.A_REVERSE
+            try:
+                self.stdscr.addstr(status_y, 0, status.ljust(max_w - 1)[:max_w - 1], attr)
+            except curses.error:
+                pass
+
+        # Help bar
+        help_y = max_h - 1
+        if help_y > 0:
+            help_text = (
+                " [Space]Run [S]tep [R]eset | "
+                "[P/N]Preset [+/-]Gravity [T]rail | "
+                "[A]dd planet [Shift+A]dd star | "
+                "[F]aster [D]slower | [Shift+K]Exit [Q]uit"
+            )
+            try:
+                self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
+            except curses.error:
+                pass
+
     # --- brush mode ---
 
     def _brush_offsets(self) -> list[tuple[int, int]]:
@@ -8355,6 +8867,8 @@ class App:
             self._draw_erosion(max_h, max_w, grid_rows, grid_cols)
         elif self.magfield_mode:
             self._draw_magfield(max_h, max_w, grid_rows, grid_cols)
+        elif self.nbody_mode:
+            self._draw_nbody(max_h, max_w, grid_rows, grid_cols)
         elif self.split_mode:
             self._draw_split(max_h, max_w, grid_rows, grid_cols)
         elif self.blueprint_mode:
