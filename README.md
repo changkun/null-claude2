@@ -13,7 +13,7 @@ A terminal-based simulation suite featuring 27 interactive modes — from Conway
 ```bash
 # Clone and run
 git clone <repo-url>
-cd null-claude2
+cd cellular-automaton-sandbox
 
 # Using uv (recommended)
 uv run game_of_life.py
