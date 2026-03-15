@@ -6,6 +6,7 @@ import curses
 import json
 import os
 import random
+import re
 from collections import Counter
 from typing import ClassVar
 
@@ -103,6 +104,94 @@ def get_all_patterns() -> tuple[dict[str, list[tuple[int, int]]], list[str]]:
 
 
 PATTERN_NAMES = list(PATTERNS.keys())
+
+
+# ---------------------------------------------------------------------------
+# RLE (Run Length Encoded) pattern parser
+# ---------------------------------------------------------------------------
+
+def parse_rle(text: str) -> tuple[list[tuple[int, int]], str, str | None]:
+    """Parse an RLE-encoded pattern string.
+
+    Returns (cells, name, rule) where cells is a list of (row, col) offsets,
+    name is the pattern name (from #N header or "RLE pattern"), and rule is
+    the rulestring if present (e.g. "B3/S23") or None.
+    """
+    name = "RLE pattern"
+    rule_str: str | None = None
+    body_lines: list[str] = []
+    header_seen = False
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Comment / metadata lines start with #
+        if stripped.startswith("#"):
+            tag = stripped[1:2]
+            if tag == "N":
+                name = stripped[2:].strip() or name
+            continue
+        # Header line: x = ..., y = ..., rule = ...
+        if not header_seen and stripped.startswith("x"):
+            header_seen = True
+            rule_match = re.search(r"rule\s*=\s*(\S+)", stripped, re.IGNORECASE)
+            if rule_match:
+                rule_str = rule_match.group(1)
+            continue
+        # Body line (pattern data)
+        body_lines.append(stripped)
+
+    rle_data = "".join(body_lines)
+
+    # Parse the run-length encoded body
+    cells: list[tuple[int, int]] = []
+    row, col = 0, 0
+    i = 0
+    while i < len(rle_data):
+        ch = rle_data[i]
+        if ch == "!":
+            break
+        # Read optional run count
+        run = 0
+        while i < len(rle_data) and rle_data[i].isdigit():
+            run = run * 10 + int(rle_data[i])
+            i += 1
+        if run == 0:
+            run = 1
+        if i >= len(rle_data):
+            break
+        ch = rle_data[i]
+        i += 1
+        if ch == "b":
+            # Dead cells — advance column
+            col += run
+        elif ch == "o":
+            # Alive cells
+            for _ in range(run):
+                cells.append((row, col))
+                col += 1
+        elif ch == "$":
+            # End of row(s)
+            row += run
+            col = 0
+        # Skip any other characters (whitespace, etc.)
+
+    return cells, name, rule_str
+
+
+def load_rle_file(filepath: str) -> tuple[list[tuple[int, int]], str, str | None]:
+    """Load and parse an RLE file from disk.
+
+    Returns (cells, name, rule). Raises OSError on file errors,
+    ValueError if the file contains no valid pattern data.
+    """
+    with open(filepath, "r") as f:
+        text = f.read()
+    cells, name, rule = parse_rle(text)
+    if not cells:
+        raise ValueError("No alive cells found in RLE data")
+    return cells, name, rule
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +741,10 @@ class App:
         elif key == ord("x"):
             self._delete_custom_pattern()
 
+        # Import RLE pattern file
+        elif key == ord("L"):
+            self._import_rle()
+
         # Brush: toggle painting with [V]
         elif key == ord("v"):
             self.brush_active = not self.brush_active
@@ -1064,7 +1157,7 @@ class App:
                 f" [Space]Run [S]tep [R]and [C]lear [Q]uit | "
                 f"[P/N]Pat: {pat_name}{custom_tag} [Enter]Place [Esc]Desel |"
                 f"{brush_info} | "
-                f"[F/G]Rule [D]ash [B]lue [X]Del [+/-]Spd [T]orus [</>]Rew [W]Save [O]Load"
+                f"[F/G]Rule [D]ash [B]lue [X]Del [L]RLE [+/-]Spd [T]orus [</>]Rew [W]Save [O]Load"
             )
             try:
                 self.stdscr.addstr(help_y, 0, help_text[:max_w - 1], curses.A_DIM)
@@ -1292,6 +1385,45 @@ class App:
             self._set_message(f"Loaded from {self.filepath}")
         except (OSError, json.JSONDecodeError, KeyError) as e:
             self._set_message(f"Load error: {e}")
+
+    def _import_rle(self) -> None:
+        """Import an RLE pattern file and add it to the pattern library."""
+        path = self._text_prompt("RLE file path: ")
+        if not path:
+            self._set_message("Import cancelled")
+            return
+        # Expand ~ and resolve relative paths
+        path = os.path.expanduser(path)
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+        try:
+            cells, name, rule = load_rle_file(path)
+        except (OSError, ValueError) as e:
+            self._set_message(f"RLE import error: {e}")
+            return
+        # Normalize offsets so the pattern starts at (0, 0)
+        min_r = min(r for r, _ in cells)
+        min_c = min(c for _, c in cells)
+        offsets = [(r - min_r, c - min_c) for r, c in cells]
+        # Avoid name collisions
+        base_name = name
+        suffix = 1
+        while name in self.all_patterns:
+            suffix += 1
+            name = f"{base_name} ({suffix})"
+        # Save as a custom pattern so it persists
+        custom = load_custom_patterns()
+        custom[name] = offsets
+        try:
+            save_custom_patterns(custom)
+        except OSError as e:
+            self._set_message(f"Save error: {e}")
+            return
+        self._refresh_patterns()
+        # Select the newly imported pattern
+        if name in self.all_pattern_names:
+            self.pattern_idx = self.all_pattern_names.index(name)
+        self._set_message(f"Imported '{name}' ({len(offsets)} cells) — [Enter] to place")
 
     # --- helpers ---
 
